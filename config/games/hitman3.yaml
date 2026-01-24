@@ -10,7 +10,7 @@ metadata:
   benchmark_duration: 180
   startup_wait: 15
   resolution: 1920x1080
-  preset: Ultra
+  preset: High
   engine: Glacier 2
   graphics_api: DirectX 12
 steps:

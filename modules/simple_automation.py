@@ -64,9 +64,24 @@ class SimpleAutomation:
         # Optional step handlers
         self.optional_steps = self.config.get("optional_steps", {})
         
+        # Hooks configuration
+        self.hooks = self.config.get("hooks", {})
+        self.persistent_processes = {}  # Track persistent hook processes (PID -> hook_config)
+
         logger.info(f"SimpleAutomation initialized for {self.game_name}")
         if self.process_id:
             logger.info(f"Process ID tracking enabled: {self.process_id}")
+        if self.hooks:
+            pre_hooks = len(self.hooks.get("pre", []))
+            post_hooks = len(self.hooks.get("post", []))
+            logger.info(f"Hooks configured: {pre_hooks} pre-hooks, {post_hooks} post-hooks")
+
+        # Log SUT resolution for debugging
+        try:
+            resolution = self.network.get_resolution()
+            logger.info(f"Detected SUT Resolution: {resolution['width']}x{resolution['height']}")
+        except Exception as e:
+            logger.warning(f"Could not determine SUT resolution: {e}")
 
     def _execute_fallback(self):
         """Execute fallback action when step fails."""
@@ -87,18 +102,27 @@ class SimpleAutomation:
         """Run the enhanced step-by-step automation with optional step handling."""
         # Get steps from configuration
         steps = self.config.get("steps", {})
-        
+
         if not steps:
             logger.error("No steps defined in configuration")
             return False
-        
+
         # Convert all step keys to strings to handle both integer and string keys
         normalized_steps = {}
         for key, value in steps.items():
             normalized_steps[str(key)] = value
         steps = normalized_steps
-        
+
         logger.info(f"Starting enhanced automation with {len(steps)} steps")
+
+        # Execute pre-automation hooks
+        try:
+            self._execute_pre_hooks()
+            self._start_persistent_hooks()
+        except Exception as e:
+            logger.error(f"Pre-hook execution failed: {e}")
+            self._stop_persistent_hooks()  # Clean up any started persistent hooks
+            return False
 
         # Update total steps in progress callback (for X/Y display in GUI)
         if self.progress_callback:
@@ -218,15 +242,26 @@ class SimpleAutomation:
                     logger.warning(f"Step {current_step} failed, retry {retries}/{max_retries}")
                     if retries >= max_retries:
                         logger.error(f"Max retries reached for step {current_step}")
+                        # Clean up hooks before returning failure
+                        self._stop_persistent_hooks()
+                        self._execute_post_hooks()
                         return False
-                    
+
                     if not is_optional_step:
                          logger.info(f"Waiting {self.retry_delay}s before retry...")
                          time.sleep(self.retry_delay)
-                    
+
                     self._execute_fallback()
-                
-        return current_step > len(steps)
+
+        # Automation completed - execute post-hooks and cleanup
+        automation_success = current_step > len(steps)
+        try:
+            self._stop_persistent_hooks()
+            self._execute_post_hooks()
+        except Exception as e:
+            logger.error(f"Post-hook execution failed: {e}")
+
+        return automation_success
     
     def _process_step_modular(self, step: Dict[str, Any], bounding_boxes: List[BoundingBox], step_num: int) -> bool:
         """Process a step using the new modular action system with enhanced logging."""
@@ -327,7 +362,11 @@ class SimpleAutomation:
         # === SEQUENCE ACTIONS ===
         elif action_type == "sequence":
             return self._handle_sequence_action(action_config, target_element)
-        
+
+        # === SIDELOAD ACTIONS ===
+        elif action_type == "sideload":
+            return self._handle_sideload_action(action_config)
+
         else:
             logger.error(f"Unknown action type: {action_type}")
             return False
@@ -739,9 +778,262 @@ class SimpleAutomation:
         
         logger.debug("❌ No matching element found")
         return None
-            
 
-    
+    # ========================================================================
+    # HOOK MANAGEMENT METHODS
+    # ========================================================================
+
+    def _execute_pre_hooks(self):
+        """Execute non-persistent pre-hooks before step 1 starts."""
+        pre_hooks = self.hooks.get("pre", [])
+        if not pre_hooks:
+            return
+
+        logger.info("=" * 60)
+        logger.info("EXECUTING PRE-HOOKS")
+        logger.info("=" * 60)
+
+        for i, hook in enumerate(pre_hooks):
+            # Skip persistent hooks - they're handled separately
+            if hook.get("persistent", False):
+                continue
+
+            path = hook.get("path")
+            if not path:
+                logger.warning(f"Pre-hook {i+1} missing 'path', skipping")
+                continue
+
+            args = hook.get("args", [])
+            timeout = hook.get("timeout", 300)
+            working_dir = hook.get("working_dir")
+            shell = hook.get("shell")
+
+            logger.info(f"Executing pre-hook {i+1}: {path}")
+
+            try:
+                result = self.network.execute_command(
+                    path=path,
+                    args=args,
+                    timeout=timeout,
+                    working_dir=working_dir,
+                    wait=True,
+                    shell=shell
+                )
+
+                if result.get("status") == "success":
+                    logger.info(f"Pre-hook {i+1} completed successfully (exit code: {result.get('exit_code', 0)})")
+                    if result.get("stdout"):
+                        logger.debug(f"Pre-hook stdout: {result.get('stdout')[:500]}")
+                else:
+                    logger.warning(f"Pre-hook {i+1} failed: {result.get('error', 'Unknown error')}")
+                    if result.get("stderr"):
+                        logger.warning(f"Pre-hook stderr: {result.get('stderr')[:500]}")
+
+            except Exception as e:
+                logger.error(f"Pre-hook {i+1} execution failed: {e}")
+                raise
+
+        logger.info("Pre-hooks completed")
+
+    def _start_persistent_hooks(self):
+        """Start persistent hooks that run throughout the automation."""
+        pre_hooks = self.hooks.get("pre", [])
+        if not pre_hooks:
+            return
+
+        persistent_hooks = [h for h in pre_hooks if h.get("persistent", False)]
+        if not persistent_hooks:
+            return
+
+        logger.info("=" * 60)
+        logger.info("STARTING PERSISTENT HOOKS")
+        logger.info("=" * 60)
+
+        for i, hook in enumerate(persistent_hooks):
+            path = hook.get("path")
+            if not path:
+                logger.warning(f"Persistent hook {i+1} missing 'path', skipping")
+                continue
+
+            args = hook.get("args", [])
+            working_dir = hook.get("working_dir")
+            shell = hook.get("shell")
+
+            logger.info(f"Starting persistent hook {i+1}: {path}")
+
+            try:
+                result = self.network.execute_command(
+                    path=path,
+                    args=args,
+                    timeout=0,  # Not used for async
+                    working_dir=working_dir,
+                    wait=False,  # Don't wait - run in background
+                    shell=shell
+                )
+
+                if result.get("status") == "success":
+                    pid = result.get("pid")
+                    logger.info(f"Persistent hook {i+1} started (PID: {pid})")
+                    # Track the process for later termination
+                    self.persistent_processes[pid] = {
+                        "path": path,
+                        "hook_config": hook
+                    }
+                else:
+                    logger.error(f"Failed to start persistent hook {i+1}: {result.get('error', 'Unknown error')}")
+
+            except Exception as e:
+                logger.error(f"Persistent hook {i+1} start failed: {e}")
+                raise
+
+        if self.persistent_processes:
+            logger.info(f"Started {len(self.persistent_processes)} persistent hook(s)")
+
+    def _stop_persistent_hooks(self):
+        """Stop all persistent hooks after automation completes."""
+        if not self.persistent_processes:
+            return
+
+        logger.info("=" * 60)
+        logger.info("STOPPING PERSISTENT HOOKS")
+        logger.info("=" * 60)
+
+        for pid, info in list(self.persistent_processes.items()):
+            path = info.get("path", "unknown")
+            logger.info(f"Terminating persistent hook: {path} (PID: {pid})")
+
+            try:
+                result = self.network.terminate_process(pid)
+                if result.get("terminated"):
+                    logger.info(f"Persistent hook terminated: PID {pid}")
+                else:
+                    logger.warning(f"Could not confirm termination of PID {pid}")
+            except Exception as e:
+                logger.warning(f"Error terminating persistent hook PID {pid}: {e}")
+
+        self.persistent_processes.clear()
+        logger.info("Persistent hooks cleanup completed")
+
+    def _execute_post_hooks(self):
+        """Execute post-hooks after all steps complete."""
+        post_hooks = self.hooks.get("post", [])
+        if not post_hooks:
+            return
+
+        logger.info("=" * 60)
+        logger.info("EXECUTING POST-HOOKS")
+        logger.info("=" * 60)
+
+        for i, hook in enumerate(post_hooks):
+            path = hook.get("path")
+            if not path:
+                logger.warning(f"Post-hook {i+1} missing 'path', skipping")
+                continue
+
+            args = hook.get("args", [])
+            timeout = hook.get("timeout", 300)
+            working_dir = hook.get("working_dir")
+            shell = hook.get("shell")
+
+            logger.info(f"Executing post-hook {i+1}: {path}")
+
+            try:
+                result = self.network.execute_command(
+                    path=path,
+                    args=args,
+                    timeout=timeout,
+                    working_dir=working_dir,
+                    wait=True,
+                    shell=shell
+                )
+
+                if result.get("status") == "success":
+                    logger.info(f"Post-hook {i+1} completed successfully (exit code: {result.get('exit_code', 0)})")
+                    if result.get("stdout"):
+                        logger.debug(f"Post-hook stdout: {result.get('stdout')[:500]}")
+                else:
+                    logger.warning(f"Post-hook {i+1} failed: {result.get('error', 'Unknown error')}")
+                    if result.get("stderr"):
+                        logger.warning(f"Post-hook stderr: {result.get('stderr')[:500]}")
+
+            except Exception as e:
+                logger.error(f"Post-hook {i+1} execution failed: {e}")
+                # Don't raise - post-hooks are best-effort
+
+        logger.info("Post-hooks completed")
+
+    # ========================================================================
+    # SIDELOAD ACTION HANDLER
+    # ========================================================================
+
+    def _handle_sideload_action(self, action_config: Dict[str, Any]) -> bool:
+        """
+        Handle sideload action - execute an external script/executable within a step.
+
+        Args:
+            action_config: Action configuration with:
+                - path: Path to executable (required)
+                - args: Command line arguments (optional)
+                - timeout: Max seconds to wait (default: 300)
+                - working_dir: Working directory (optional)
+                - wait_for_completion: If True, block until done (default: True)
+                - check_exit_code: If True, fail step on non-zero exit (default: True)
+                - shell: Run in shell (optional, auto-detect)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        path = action_config.get("path")
+        if not path:
+            logger.error("Sideload action missing 'path'")
+            return False
+
+        args = action_config.get("args", [])
+        timeout = action_config.get("timeout", 300)
+        working_dir = action_config.get("working_dir")
+        wait_for_completion = action_config.get("wait_for_completion", True)
+        check_exit_code = action_config.get("check_exit_code", True)
+        shell = action_config.get("shell")
+
+        logger.info(f"Executing sideload: {path}")
+        if args:
+            logger.info(f"  Arguments: {args}")
+
+        try:
+            result = self.network.execute_command(
+                path=path,
+                args=args,
+                timeout=timeout,
+                working_dir=working_dir,
+                wait=wait_for_completion,
+                shell=shell
+            )
+
+            if wait_for_completion:
+                exit_code = result.get("exit_code", -1)
+                status = result.get("status", "unknown")
+
+                if result.get("stdout"):
+                    logger.info(f"Sideload stdout: {result.get('stdout')[:1000]}")
+                if result.get("stderr"):
+                    logger.warning(f"Sideload stderr: {result.get('stderr')[:1000]}")
+
+                if check_exit_code and exit_code != 0:
+                    logger.error(f"Sideload failed with exit code: {exit_code}")
+                    return False
+
+                logger.info(f"Sideload completed (exit code: {exit_code})")
+                return True
+            else:
+                # Fire and forget - process started in background
+                pid = result.get("pid", "unknown")
+                logger.info(f"Sideload started in background (PID: {pid})")
+                return True
+
+        except Exception as e:
+            logger.error(f"Sideload execution failed: {e}")
+            return False
+
     def _verify_step_success(self, step: Dict[str, Any], step_num: int) -> bool:
         """Verify step success with enhanced checking."""
         logger.info("Verifying step success...")

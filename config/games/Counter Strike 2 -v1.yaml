@@ -11,9 +11,11 @@ metadata:
   preset: High
   engine: Source 2
   graphics_api: DirectX 11
+ # steam_username: "arrlauto1"
+ # steam_password: "arlr@101"
 steps:
   1:
-    description: Left-click PLAY button from main menu
+    description: NAVIGATE TO PLAY
     find:
       type: icon
       text: PLAY
@@ -52,7 +54,7 @@ steps:
     expected_delay: 1
     timeout: 30
   4:
-    description: click GO button for Start benchmark
+    description: click GO TO Start benchmark
     find:
       type: icon
       text: GO

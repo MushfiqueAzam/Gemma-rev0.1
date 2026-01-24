@@ -34,6 +34,57 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class CollapsibleFrame(ttk.Frame):
+    """A frame that can be collapsed/expanded with a toggle button."""
+    
+    def __init__(self, parent, title="", collapsed=False, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        self.collapsed = collapsed
+        self.title = title
+        
+        # Header frame with toggle button
+        self.header = ttk.Frame(self)
+        self.header.pack(fill=tk.X)
+        
+        # Toggle button with arrow indicator
+        self.toggle_btn = ttk.Button(
+            self.header, 
+            text=f"{'▶' if collapsed else '▼'} {title}",
+            command=self.toggle,
+            style="Toolbutton"
+        )
+        self.toggle_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Content frame
+        self.content = ttk.Frame(self)
+        if not collapsed:
+            self.content.pack(fill=tk.BOTH, expand=True)
+    
+    def toggle(self):
+        """Toggle collapsed state."""
+        self.collapsed = not self.collapsed
+        
+        if self.collapsed:
+            self.content.pack_forget()
+            self.toggle_btn.config(text=f"▶ {self.title}")
+        else:
+            self.content.pack(fill=tk.BOTH, expand=True)
+            self.toggle_btn.config(text=f"▼ {self.title}")
+    
+    def collapse(self):
+        """Collapse the frame."""
+        if not self.collapsed:
+            self.toggle()
+    
+    def expand(self):
+        """Expand the frame."""
+        if self.collapsed:
+            self.toggle()
+
+
+
+
 class WorkflowStep:
     """Represents a single workflow step."""
 
@@ -83,6 +134,10 @@ class WorkflowStep:
             }
             step_dict["action"] = self.action_config
 
+        # Handle sideload action (no find block needed)
+        elif self.action_type == "sideload":
+            step_dict["action"] = self.action_config
+
         # Handle actions without find block
         elif self.action_config:
             step_dict["action"] = self.action_config
@@ -102,7 +157,7 @@ class WorkflowStep:
 
 
 class InteractiveCanvas(tk.Canvas):
-    """Canvas with interactive bounding boxes."""
+    """Canvas with interactive bounding boxes and zoom support."""
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
@@ -112,9 +167,16 @@ class InteractiveCanvas(tk.Canvas):
         self.selected_bbox = None
         self.bbox_items = {}
         self.callback = None
+        self.zoom_scale = 1.0  # 1.0 = 100%
 
         self.bind("<Button-1>", self.on_click)
         self.bind("<Motion>", self.on_hover)
+
+    def set_zoom(self, scale: float):
+        """Set zoom scale and redraw."""
+        self.zoom_scale = scale
+        if self.image:
+            self.draw_bboxes()
 
     def load_image(self, image_path: str, bboxes: List[BoundingBox]):
         """Load image and draw bounding boxes."""
@@ -127,25 +189,36 @@ class InteractiveCanvas(tk.Canvas):
             logger.error(f"Failed to load image: {e}")
 
     def draw_bboxes(self):
-        """Draw bounding boxes on image."""
+        """Draw bounding boxes on image with zoom applied."""
         if not self.image:
             return
 
-        # Create a copy for drawing
-        img_copy = self.image.copy()
-        draw = ImageDraw.Draw(img_copy, 'RGBA')
+        # Apply zoom to create scaled image
+        scale = self.zoom_scale
+        new_width = int(self.image.width * scale)
+        new_height = int(self.image.height * scale)
+        
+        if scale != 1.0:
+            img_scaled = self.image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        else:
+            img_scaled = self.image.copy()
 
-        # Try to load a font
+        # Create a copy for drawing
+        draw = ImageDraw.Draw(img_scaled, 'RGBA')
+
+        # Try to load a font (scaled)
         try:
-            font = ImageFont.truetype("arial.ttf", 12)
+            font_size = max(8, int(12 * scale))
+            font = ImageFont.truetype("arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
 
-        # Draw each bounding box
+        # Draw each bounding box (scaled)
         self.bbox_items = {}
         for i, bbox in enumerate(self.bboxes):
-            x1, y1 = bbox.x, bbox.y
-            x2, y2 = bbox.x + bbox.width, bbox.y + bbox.height
+            # Scale coordinates
+            x1, y1 = int(bbox.x * scale), int(bbox.y * scale)
+            x2, y2 = int((bbox.x + bbox.width) * scale), int((bbox.y + bbox.height) * scale)
 
             # Color based on type
             if bbox.element_type == "icon":
@@ -170,17 +243,16 @@ class InteractiveCanvas(tk.Canvas):
             text = bbox.element_text[:20] if bbox.element_text else bbox.element_type
             draw.text((x1 + 2, y1 + 2), text, fill=(255, 255, 255, 255), font=font)
 
-            # Store bbox coordinates (at original size)
+            # Store scaled bbox coordinates for click detection
             self.bbox_items[i] = (x1, y1, x2, y2)
 
-        # NO RESIZING - Use original image size for maximum accuracy
         # Convert to PhotoImage
-        self.photo = ImageTk.PhotoImage(img_copy)
+        self.photo = ImageTk.PhotoImage(img_scaled)
 
-        # Update canvas - set to original image size
+        # Update canvas size
         self.delete("all")
-        self.config(width=img_copy.width, height=img_copy.height,
-                   scrollregion=(0, 0, img_copy.width, img_copy.height))
+        self.config(width=new_width, height=new_height,
+                   scrollregion=(0, 0, new_width, new_height))
         self.create_image(0, 0, anchor=tk.NW, image=self.photo)
 
     def on_click(self, event):
@@ -254,9 +326,9 @@ class ActionDefinitionDialog(tk.Toplevel):
         desc_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.desc_var = tk.StringVar()
-        ttk.Entry(desc_frame, textvariable=self.desc_var, width=60, font=('TkDefaultFont', 10)).pack(fill=tk.X)
+        ttk.Entry(desc_frame, textvariable=self.desc_var, width=60, font=('TkDefaultFont', 12)).pack(fill=tk.X)
         ttk.Label(desc_frame, text="What does this step do? (e.g., 'Click PLAY button', 'Enter username')",
-                 font=('TkDefaultFont', 8), foreground="gray").pack(anchor=tk.W, pady=(2,0))
+                 font=('TkDefaultFont', 10), foreground="gray").pack(anchor=tk.W, pady=(2,0))
 
         # === ACTION TYPE SELECTION (ORGANIZED RADIO BUTTONS) ===
         action_frame = ttk.LabelFrame(scrollable_frame, text="Action Type - Select what to do", padding=10)
@@ -284,9 +356,10 @@ class ActionDefinitionDialog(tk.Toplevel):
             ],
             # Column 3: Other actions
             [
-                ("🖱️ Other Actions", None, "header"),
+                ("🔧 Other Actions", None, "header"),
                 ("Scroll", "scroll", "Scroll up or down"),
-                ("Wait", "wait", "Wait for specified time")
+                ("Wait", "wait", "Wait for specified time"),
+                ("Sideload", "sideload", "Run external script/executable")
             ]
         ]
 
@@ -310,7 +383,7 @@ class ActionDefinitionDialog(tk.Toplevel):
 
                     # Description label
                     ttk.Label(rb_frame, text=f"  {item[2]}",
-                             font=('TkDefaultFont', 7), foreground="gray").pack(anchor=tk.W, padx=(20,0))
+                             font=('TkDefaultFont', 9), foreground="gray").pack(anchor=tk.W, padx=(20,0))
 
         # === FIND ELEMENT (for actions that need it) ===
         self.element_frame = ttk.LabelFrame(scrollable_frame, text="Find Element - Which element to interact with?", padding=10)
@@ -321,14 +394,14 @@ class ActionDefinitionDialog(tk.Toplevel):
                     values=["icon", "text", "any"], state="readonly", width=15)
         type_combo.grid(row=0, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.element_frame, text="icon = button/clickable, text = label, any = both",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=0, column=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=0, column=2, sticky=tk.W, padx=5)
 
         ttk.Label(self.element_frame, text="Text Content:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=(5,10))
         self.text_var = tk.StringVar(value=self.bbox.element_text if self.bbox else "")
-        ttk.Entry(self.element_frame, textvariable=self.text_var, width=35, font=('TkDefaultFont', 9)).grid(
+        ttk.Entry(self.element_frame, textvariable=self.text_var, width=35, font=('TkDefaultFont', 11)).grid(
             row=1, column=1, columnspan=2, sticky=tk.W, pady=5)
         ttk.Label(self.element_frame, text="The text visible on the element (e.g., 'PLAY', 'Submit', 'OK')",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=2, column=1, columnspan=2, sticky=tk.W)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=2, column=1, columnspan=2, sticky=tk.W)
 
         ttk.Label(self.element_frame, text="Match Method:").grid(row=3, column=0, sticky=tk.W, pady=5, padx=(5,10))
         self.match_var = tk.StringVar(value="contains")
@@ -337,7 +410,7 @@ class ActionDefinitionDialog(tk.Toplevel):
                     state="readonly", width=15)
         match_combo.grid(row=3, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.element_frame, text="'contains' is most flexible",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=3, column=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=3, column=2, sticky=tk.W, padx=5)
 
         # === ACTION-SPECIFIC SETTINGS (shown based on action type) ===
 
@@ -353,7 +426,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.move_duration_var = tk.StringVar(value="0.3")
         ttk.Entry(self.click_frame, textvariable=self.move_duration_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.click_frame, text="seconds - Time to move mouse to element",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=1, column=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=2, sticky=tk.W, padx=5)
 
         # Key press options
         self.key_frame = ttk.LabelFrame(scrollable_frame, text="Key Press - Which key?", padding=10)
@@ -361,7 +434,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.key_var = tk.StringVar(value="enter")
         ttk.Entry(self.key_frame, textvariable=self.key_var, width=25).grid(row=0, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.key_frame, text="Common: enter, escape, tab, space, f1-f12, up, down, left, right",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
 
         # Hotkey options
         self.hotkey_frame = ttk.LabelFrame(scrollable_frame, text="Key Combination - Which keys together?", padding=10)
@@ -369,7 +442,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.hotkey_var = tk.StringVar(value="ctrl, s")
         ttk.Entry(self.hotkey_frame, textvariable=self.hotkey_var, width=25).grid(row=0, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.hotkey_frame, text="Examples: ctrl, s  or  ctrl, shift, esc  or  alt, f4",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
 
         # Text input options
         self.text_frame = ttk.LabelFrame(scrollable_frame, text="Type Text - What to type?", padding=10)
@@ -389,7 +462,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.dest_y_var = tk.StringVar(value="0")
         ttk.Entry(self.drag_frame, textvariable=self.dest_y_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.drag_frame, text="Pixel coordinates where to drop the element",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
 
         # Scroll options
         self.scroll_frame = ttk.LabelFrame(scrollable_frame, text="Scroll Settings", padding=10)
@@ -401,7 +474,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.scroll_clicks_var = tk.StringVar(value="3")
         ttk.Entry(self.scroll_frame, textvariable=self.scroll_clicks_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.scroll_frame, text="Number of scroll clicks (higher = scroll more)",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
 
         # Wait options
         self.wait_frame = ttk.LabelFrame(scrollable_frame, text="Wait Duration", padding=10)
@@ -409,14 +482,42 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.duration_var = tk.StringVar(value="2")
         ttk.Entry(self.wait_frame, textvariable=self.duration_var, width=10).grid(row=0, column=1, sticky=tk.W, pady=5)
         ttk.Label(self.wait_frame, text="How many seconds to pause",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=(5,0))
+
+        # Sideload options
+        self.sideload_frame = ttk.LabelFrame(scrollable_frame, text="Sideload - Run External Script/Executable", padding=10)
+        ttk.Label(self.sideload_frame, text="Path:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=(5,10))
+        self.sideload_path_var = tk.StringVar()
+        ttk.Entry(self.sideload_frame, textvariable=self.sideload_path_var, width=50).grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=5)
+        ttk.Label(self.sideload_frame, text="Full path to script (.py, .bat, .ps1, .exe)",
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=1, columnspan=2, sticky=tk.W, padx=(0,0))
+
+        ttk.Label(self.sideload_frame, text="Arguments:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=(5,10))
+        self.sideload_args_var = tk.StringVar()
+        ttk.Entry(self.sideload_frame, textvariable=self.sideload_args_var, width=50).grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=5)
+        ttk.Label(self.sideload_frame, text="Command line arguments, comma-separated (e.g., --output, C:\\Logs)",
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=(0,0))
+
+        ttk.Label(self.sideload_frame, text="Timeout:").grid(row=4, column=0, sticky=tk.W, pady=5, padx=(5,10))
+        self.sideload_timeout_var = tk.StringVar(value="300")
+        ttk.Entry(self.sideload_frame, textvariable=self.sideload_timeout_var, width=10).grid(row=4, column=1, sticky=tk.W, pady=5)
+        ttk.Label(self.sideload_frame, text="seconds",
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=4, column=2, sticky=tk.W, padx=5)
+
+        self.sideload_wait_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.sideload_frame, text="Wait for completion (block until script finishes)",
+                       variable=self.sideload_wait_var).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=2, padx=(5,0))
+
+        self.sideload_check_exit_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.sideload_frame, text="Check exit code (fail step if non-zero)",
+                       variable=self.sideload_check_exit_var).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=2, padx=(5,0))
 
         # === VERIFY SUCCESS ===
         self.verify_frame = ttk.LabelFrame(scrollable_frame, text="Verify Success (Optional) - Check if action worked", padding=10)
         self.verify_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(self.verify_frame, text="Add elements that should appear after this action completes:",
-                 font=('TkDefaultFont', 8), foreground="gray").pack(anchor=tk.W, pady=2)
+                 font=('TkDefaultFont', 10), foreground="gray").pack(anchor=tk.W, pady=2)
 
         verify_list_frame = ttk.Frame(self.verify_frame)
         verify_list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -442,20 +543,20 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.delay_var = tk.StringVar(value="2")
         ttk.Entry(timing_frame, textvariable=self.delay_var, width=10).grid(row=0, column=1, sticky=tk.W, pady=5)
         ttk.Label(timing_frame, text="seconds - Wait after completing this step before next step",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=0, column=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=0, column=2, sticky=tk.W, padx=5)
 
         ttk.Label(timing_frame, text="Timeout:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=(5,10))
         self.timeout_var = tk.StringVar(value="20")
         ttk.Entry(timing_frame, textvariable=self.timeout_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
         ttk.Label(timing_frame, text="seconds - Maximum time to wait for element to appear",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=1, column=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=1, column=2, sticky=tk.W, padx=5)
 
         ttk.Label(timing_frame, text="Optional Step:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=(5,10))
         self.optional_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(timing_frame, text="Continue workflow even if this step fails",
                        variable=self.optional_var).grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=5)
         ttk.Label(timing_frame, text="If checked, failures in this step won't stop the workflow",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=5)
+                 font=('TkDefaultFont', 9), foreground="gray").grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=5)
 
         # === BUTTONS ===
         btn_frame = ttk.Frame(scrollable_frame)
@@ -520,6 +621,7 @@ class ActionDefinitionDialog(tk.Toplevel):
         self.drag_frame.pack_forget()
         self.scroll_frame.pack_forget()
         self.wait_frame.pack_forget()
+        self.sideload_frame.pack_forget()
 
         # Show relevant frames
         if action == "find_and_click":
@@ -543,6 +645,8 @@ class ActionDefinitionDialog(tk.Toplevel):
             self.scroll_frame.pack(fill=tk.X, padx=10, pady=5, before=self.verify_frame)
         elif action == "wait":
             self.wait_frame.pack(fill=tk.X, padx=10, pady=5, before=self.verify_frame)
+        elif action == "sideload":
+            self.sideload_frame.pack(fill=tk.X, padx=10, pady=5, before=self.verify_frame)
 
     def on_ok(self):
         """Build result and close."""
@@ -628,6 +732,20 @@ class ActionDefinitionDialog(tk.Toplevel):
                     "duration": duration
                 }
 
+            elif action == "sideload":
+                # Parse args from comma-separated string
+                args_str = self.sideload_args_var.get().strip()
+                args = [a.strip() for a in args_str.split(",")] if args_str else []
+
+                self.result["action_config"] = {
+                    "type": "sideload",
+                    "path": self.sideload_path_var.get(),
+                    "args": args,
+                    "timeout": int(self.sideload_timeout_var.get()) if self.sideload_timeout_var.get() else 300,
+                    "wait_for_completion": self.sideload_wait_var.get(),
+                    "check_exit_code": self.sideload_check_exit_var.get()
+                }
+
             self.destroy()
 
         except Exception as e:
@@ -658,7 +776,40 @@ class WorkflowBuilderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Katana Workflow Builder")
-        self.root.geometry("1600x900")
+        
+        # Enable DPI awareness on Windows
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except:
+            pass
+        
+        # Dynamic window size based on screen (85% of screen)
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        win_width = int(screen_width * 0.85)
+        win_height = int(screen_height * 0.85)
+        self.root.geometry(f"{win_width}x{win_height}")
+        
+        # Store scale factor for font sizing
+        self.scale_factor = max(1.0, screen_height / 1080)  # Relative to 1080p, minimum 1.0
+        
+        # Configure global fonts for better readability
+        import tkinter.font as tkfont
+        base_size = int(11 * self.scale_factor)  # Base font size 11pt
+        self.fonts = {
+            'default': ('Segoe UI', base_size),
+            'bold': ('Segoe UI', base_size, 'bold'),
+            'small': ('Segoe UI', int(base_size * 0.85)),
+            'large': ('Segoe UI', int(base_size * 1.2), 'bold'),
+            'mono': ('Consolas', base_size),
+            'icon': ('Segoe UI Symbol', int(base_size * 1.3)),  # Larger icons
+        }
+        
+        # Apply default font to all widgets
+        default_font = tkfont.nametofont("TkDefaultFont")
+        default_font.configure(family="Segoe UI", size=base_size)
+        root.option_add("*Font", default_font)
 
         # State
         self.current_screenshot = None
@@ -668,13 +819,16 @@ class WorkflowBuilderGUI:
         self.screenshot_mgr = None
         self.vision_model = None
 
+        # Hooks configuration (pre and post automation hooks)
+        self.hooks = {"pre": [], "post": []}
+
         # SUT connection
-        self.sut_ip = tk.StringVar(value="192.168.50.217") #Razer laptop
+        self.sut_ip = tk.StringVar(value="192.168.50.196") #Razer laptop
         self.sut_port = tk.StringVar(value="8080")
 
         # Vision model connections
-        self.omniparser_ip = tk.StringVar(value="localhost")
-        self.omniparser_port = tk.StringVar(value="8000")
+        self.omniparser_ip = tk.StringVar(value="192.168.50.161")
+        self.omniparser_port = tk.StringVar(value="9000")
         self.gemma_ip = tk.StringVar(value="localhost")
         self.gemma_port = tk.StringVar(value="1234")
 
@@ -699,11 +853,27 @@ class WorkflowBuilderGUI:
         # Clipboard for copy/paste
         self.copied_step = None
 
+        # Zoom levels for screenshot (cycles through these)
+        self.zoom_levels = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+        self.zoom_index = 9  # Start at 100%
+
+        # Screenshot history for ribbon (list of dicts with 'captured' and 'parsed' paths)
+        self.screenshot_history = []
+        self.history_thumbnails = []  # Keep references to avoid garbage collection
+
+        # Flow control
+        self.flow_running = False
+        self.flow_stop_requested = False
+
         self.create_widgets()
         self.center_window()
 
     def create_widgets(self):
         """Create main GUI widgets."""
+        # Enable resizing
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        
         # Menu bar
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -716,88 +886,88 @@ class WorkflowBuilderGUI:
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
 
+        # Edit menu
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Edit Hooks...", command=self.show_hooks_editor)
+
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="YAML Reference", command=self.show_yaml_reference)
+
         # Main container
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True)
 
-        # Left panel (Screenshot and controls)
+        # LEFT PANEL - Screenshot and Controls (larger)
         left_panel = ttk.Frame(main_paned)
-        main_paned.add(left_panel, weight=3)
+        main_paned.add(left_panel, weight=4)
 
-        # Control panel
-        control_frame = ttk.LabelFrame(left_panel, text="Game Control", padding=10)
-        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        # COLLAPSIBLE Control Panel
+        self.control_panel = CollapsibleFrame(left_panel, title="Model and SUT connections")
+        self.control_panel.pack(fill=tk.X, padx=5, pady=2)
+        control_frame = self.control_panel.content
 
-        # SUT connection
-        sut_frame = ttk.LabelFrame(control_frame, text="SUT Connection", padding=5)
+        # SUT connection (compact single row)
+        # SUT connection (compact single row)
+        sut_frame = ttk.Frame(control_frame)
         sut_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(sut_frame, text="SUT:").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(sut_frame, textvariable=self.sut_ip, width=14).pack(side=tk.LEFT, padx=2)
+        ttk.Label(sut_frame, text=":").pack(side=tk.LEFT)
+        ttk.Entry(sut_frame, textvariable=self.sut_port, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sut_frame, text="Connect", command=self.connect_sut, width=8).pack(side=tk.LEFT, padx=3)
+        self.sut_status_label = ttk.Label(sut_frame, text="●", foreground="red", font=('TkDefaultFont', 14))
+        self.sut_status_label.pack(side=tk.LEFT, padx=2)
 
-        sut_conn_frame = ttk.Frame(sut_frame)
-        sut_conn_frame.pack(fill=tk.X)
-
-        ttk.Label(sut_conn_frame, text="IP:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(sut_conn_frame, textvariable=self.sut_ip, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Label(sut_conn_frame, text="Port:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(sut_conn_frame, textvariable=self.sut_port, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Button(sut_conn_frame, text="Connect", command=self.connect_sut).pack(side=tk.LEFT, padx=5)
-        self.sut_status_label = ttk.Label(sut_conn_frame, text="Not Connected", foreground="red")
-        self.sut_status_label.pack(side=tk.LEFT, padx=5)
-
-        # Vision model connection
-        vision_conn_frame = ttk.LabelFrame(control_frame, text="Vision Model Connection", padding=5)
-        vision_conn_frame.pack(fill=tk.X, pady=2)
-
-        # Vision model selection
-        vision_select_frame = ttk.Frame(vision_conn_frame)
-        vision_select_frame.pack(fill=tk.X, pady=2)
-
-        ttk.Label(vision_select_frame, text="Model:").pack(side=tk.LEFT, padx=2)
+        # Vision model connection (compact)
+        vision_frame = ttk.Frame(control_frame)
+        vision_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(vision_frame, text="Vision:").pack(side=tk.LEFT, padx=2)
         self.vision_var = tk.StringVar(value="omniparser")
-        ttk.Radiobutton(vision_select_frame, text="Omniparser", variable=self.vision_var,
-                       value="omniparser", command=self.on_vision_model_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(vision_select_frame, text="Gemma", variable=self.vision_var,
-                       value="gemma", command=self.on_vision_model_change).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(vision_frame, text="Omni", variable=self.vision_var,
+                       value="omniparser", command=self.on_vision_model_change).pack(side=tk.LEFT)
+        ttk.Radiobutton(vision_frame, text="Gemma", variable=self.vision_var,
+                       value="gemma", command=self.on_vision_model_change).pack(side=tk.LEFT, padx=(0,5))
 
-        # Omniparser connection
-        self.omni_frame = ttk.Frame(vision_conn_frame)
-        self.omni_frame.pack(fill=tk.X, pady=2)
-
-        ttk.Label(self.omni_frame, text="IP:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(self.omni_frame, textvariable=self.omniparser_ip, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Label(self.omni_frame, text="Port:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(self.omni_frame, textvariable=self.omniparser_port, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Button(self.omni_frame, text="Connect", command=self.connect_vision_model).pack(side=tk.LEFT, padx=5)
-        self.vision_status_label = ttk.Label(self.omni_frame, text="Not Connected", foreground="red")
-        self.vision_status_label.pack(side=tk.LEFT, padx=5)
+        # Omniparser connection entry
+        self.omni_frame = ttk.Frame(vision_frame)
+        self.omni_frame.pack(side=tk.LEFT)
+        ttk.Entry(self.omni_frame, textvariable=self.omniparser_ip, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(self.omni_frame, text=":").pack(side=tk.LEFT)
+        ttk.Entry(self.omni_frame, textvariable=self.omniparser_port, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.omni_frame, text="Connect", command=self.connect_vision_model, width=8).pack(side=tk.LEFT, padx=3)
+        self.vision_status_label = ttk.Label(self.omni_frame, text="●", foreground="red", font=('TkDefaultFont', 14))
+        self.vision_status_label.pack(side=tk.LEFT, padx=2)
 
         # Gemma connection (hidden by default)
-        self.gemma_frame = ttk.Frame(vision_conn_frame)
+        self.gemma_frame = ttk.Frame(vision_frame)
+        ttk.Entry(self.gemma_frame, textvariable=self.gemma_ip, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(self.gemma_frame, text=":").pack(side=tk.LEFT)
+        ttk.Entry(self.gemma_frame, textvariable=self.gemma_port, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.gemma_frame, text="Connect", command=self.connect_vision_model, width=8).pack(side=tk.LEFT, padx=3)
+        self.gemma_status_label = ttk.Label(self.gemma_frame, text="●", foreground="red", font=('TkDefaultFont', 14))
+        self.gemma_status_label.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.gemma_frame, text="IP:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(self.gemma_frame, textvariable=self.gemma_ip, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Label(self.gemma_frame, text="Port:").pack(side=tk.LEFT, padx=2)
-        ttk.Entry(self.gemma_frame, textvariable=self.gemma_port, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Button(self.gemma_frame, text="Connect", command=self.connect_vision_model).pack(side=tk.LEFT, padx=5)
-
-        # Create status label for gemma frame (same reference as omni_frame status)
-        self.gemma_status_label = ttk.Label(self.gemma_frame, text="Not Connected", foreground="red")
-        self.gemma_status_label.pack(side=tk.LEFT, padx=5)
-
-        # Action buttons
+        # Action buttons (compact)
         btn_frame = ttk.Frame(control_frame)
-        btn_frame.pack(fill=tk.X, pady=5)
+        btn_frame.pack(fill=tk.X, pady=3)
 
-        ttk.Button(btn_frame, text="Capture Screenshot",
-                  command=self.capture_screenshot).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Parse Screenshot",
-                  command=self.parse_screenshot).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Test Action",
-                  command=self.test_action).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Open Screenshots Folder",
-                  command=self.open_screenshots_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="📷 Capture", command=self.capture_screenshot).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🔍 Parse", command=self.parse_screenshot).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="📁 Folder", command=self.open_screenshots_folder).pack(side=tk.LEFT, padx=2)
+        
+        # Zoom button
+        self.zoom_btn_text = tk.StringVar(value="🔎 100%")
+        self.zoom_btn = ttk.Button(btn_frame, textvariable=self.zoom_btn_text, command=self.cycle_zoom, width=8)
+        self.zoom_btn.pack(side=tk.LEFT, padx=5)
 
         # Screenshot display
-        screenshot_frame = ttk.LabelFrame(left_panel, text="Screenshot (Click on elements - Original Size)", padding=5)
+        self.screenshot_label_text = tk.StringVar(value="Screenshot (Click on elements) - Zoom: 100%")
+        screenshot_frame = ttk.LabelFrame(left_panel, text="Screenshot (Click on elements)", padding=5)
         screenshot_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Scrollable canvas with scrollbars
@@ -824,64 +994,72 @@ class WorkflowBuilderGUI:
 
         self.canvas.callback = self.on_element_selected
 
-        # Right panel (Workflow steps and element details)
+        # RIGHT PANEL - Workflow steps and element details (narrower)
         right_panel = ttk.Frame(main_paned)
-        main_paned.add(right_panel, weight=2)
+        main_paned.add(right_panel, weight=1)
 
-        # Element details
-        details_frame = ttk.LabelFrame(right_panel, text="Selected Element", padding=10)
-        details_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        self.details_text = scrolledtext.ScrolledText(details_frame, height=8, width=40)
+        # COLLAPSIBLE Selected Element Panel
+        self.details_panel = CollapsibleFrame(right_panel, title="Selected Element")
+        self.details_panel.pack(fill=tk.X, padx=5, pady=2)
+        
+        self.details_text = scrolledtext.ScrolledText(self.details_panel.content, height=5, width=40)
         self.details_text.pack(fill=tk.BOTH, expand=True)
 
-        # Workflow steps
-        steps_frame = ttk.LabelFrame(right_panel, text="Workflow Steps", padding=10)
-        steps_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # COLLAPSIBLE Workflow Steps Panel (smaller height)
+        self.steps_panel = CollapsibleFrame(right_panel, title="Workflow Steps")
+        self.steps_panel.pack(fill=tk.X, padx=5, pady=2)
+        steps_content = self.steps_panel.content
 
-        # Step management buttons - Row 1
-        step_btn_frame = ttk.Frame(steps_frame)
-        step_btn_frame.pack(fill=tk.X, pady=5)
+        # Step management buttons (single row, compact)
+        step_btn_frame = ttk.Frame(steps_content)
+        step_btn_frame.pack(fill=tk.X, pady=2)
 
-        ttk.Button(step_btn_frame, text="+ Add Step",
-                  command=self.add_step).pack(side=tk.LEFT, padx=2)
-        ttk.Button(step_btn_frame, text="Edit Step",
-                  command=self.edit_step).pack(side=tk.LEFT, padx=2)
-        ttk.Button(step_btn_frame, text="Remove Step",
-                  command=self.remove_step).pack(side=tk.LEFT, padx=2)
+        ttk.Button(step_btn_frame, text="+Add", command=self.add_step, width=6).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="Edit", command=self.edit_step, width=5).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="Del", command=self.remove_step, width=4).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="▲", command=self.move_step_up, width=2).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="▼", command=self.move_step_down, width=2).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="Copy", command=self.copy_step, width=5).pack(side=tk.LEFT, padx=1)
+        ttk.Button(step_btn_frame, text="Paste", command=self.paste_step, width=5).pack(side=tk.LEFT, padx=1)
+        
+        # Test buttons with green styling
+        tk.Button(step_btn_frame, text="▶ Test", command=self.test_action, width=7,
+                  bg="#4CAF50", fg="white", font=('TkDefaultFont', 11, 'bold'),
+                  relief=tk.RAISED, bd=2).pack(side=tk.LEFT, padx=3)
+        self.flow_btn = tk.Button(step_btn_frame, text="▶▶ Flow", command=self.toggle_flow, width=8,
+                  bg="#2E7D32", fg="white", font=('TkDefaultFont', 11, 'bold'),
+                  relief=tk.RAISED, bd=2)
+        self.flow_btn.pack(side=tk.LEFT, padx=3)
 
-        # Row 2 - More actions
-        step_btn_frame2 = ttk.Frame(steps_frame)
-        step_btn_frame2.pack(fill=tk.X, pady=2)
+        # Hooks button
+        tk.Button(step_btn_frame, text="⚙ Hooks", command=self.show_hooks_editor, width=7,
+                  bg="#607D8B", fg="white", font=('TkDefaultFont', 10),
+                  relief=tk.RAISED, bd=2).pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(step_btn_frame2, text="^ Move Up",
-                  command=self.move_step_up).pack(side=tk.LEFT, padx=2)
-        ttk.Button(step_btn_frame2, text="v Move Down",
-                  command=self.move_step_down).pack(side=tk.LEFT, padx=2)
-        ttk.Button(step_btn_frame2, text="Copy Step",
-                  command=self.copy_step).pack(side=tk.LEFT, padx=2)
-        ttk.Button(step_btn_frame2, text="Paste Step",
-                  command=self.paste_step).pack(side=tk.LEFT, padx=2)
+        # Yellow Help button for YAML reference
+        tk.Button(step_btn_frame, text="? Help", command=self.show_yaml_reference, width=6,
+                  bg="#FFD700", fg="black", font=('TkDefaultFont', 10, 'bold'),
+                  relief=tk.RAISED, bd=2).pack(side=tk.RIGHT, padx=3)
 
         # Steps list
-        list_frame = ttk.Frame(steps_frame)
+        list_frame = ttk.Frame(steps_content)
         list_frame.pack(fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.steps_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
-                                        font=("Consolas", 10))
+        self.steps_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=("Consolas", 11), height=20)
         self.steps_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.steps_listbox.yview)
 
-        # Metadata frame with scrollable canvas
-        metadata_frame = ttk.LabelFrame(right_panel, text="Workflow Metadata", padding=10)
-        metadata_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # COLLAPSIBLE Metadata Panel (expanded, takes remaining space)
+        self.metadata_panel = CollapsibleFrame(right_panel, title="Workflow Metadata", collapsed=False)
+        self.metadata_panel.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+        meta_content = self.metadata_panel.content
 
         # Create canvas and scrollbar for metadata
-        meta_canvas = tk.Canvas(metadata_frame, height=250)
-        meta_scrollbar = ttk.Scrollbar(metadata_frame, orient="vertical", command=meta_canvas.yview)
+        meta_canvas = tk.Canvas(meta_content, height=200)
+        meta_scrollbar = ttk.Scrollbar(meta_content, orient="vertical", command=meta_canvas.yview)
         meta_scrollable = ttk.Frame(meta_canvas)
 
         meta_scrollable.bind(
@@ -895,77 +1073,83 @@ class WorkflowBuilderGUI:
         meta_canvas.pack(side="left", fill="both", expand=True)
         meta_scrollbar.pack(side="right", fill="y")
 
-        # === BASIC INFO ===
-        ttk.Label(meta_scrollable, text="Basic Information", font=('TkDefaultFont', 9, 'bold')).grid(
-            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0,5))
+        # Compact metadata fields with Test/Kill button for Game Path
+        row = 0
+        
+        # Regular fields before Game Path
+        for label, var, hint in [
+            ("Game Name:", self.game_name, ""),
+            ("Version:", self.version, ""),
+            ("Engine:", self.engine, "UE5, Source 2"),
+        ]:
+            ttk.Label(meta_scrollable, text=label).grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
+            ttk.Entry(meta_scrollable, textvariable=var, width=25).grid(row=row, column=1, sticky=tk.W, pady=1)
+            if hint:
+                ttk.Label(meta_scrollable, text=hint, font=('TkDefaultFont', 9), foreground="gray").grid(
+                    row=row, column=2, sticky=tk.W, padx=3)
+            row += 1
+        
+        # Game Path with Test/Kill button
+        ttk.Label(meta_scrollable, text="Game Path:").grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
+        game_path_frame = ttk.Frame(meta_scrollable)
+        game_path_frame.grid(row=row, column=1, columnspan=2, sticky=tk.W, pady=1)
+        ttk.Entry(game_path_frame, textvariable=self.game_path, width=20).pack(side=tk.LEFT)
+        
+        # Test/Kill button (starts as "▶ Test")
+        self.game_running = False
+        self.test_kill_btn = tk.Button(
+            game_path_frame, text="▶ Test", width=6, 
+            command=self.toggle_game_test,
+            bg="#4CAF50", fg="white", font=('TkDefaultFont', 10, 'bold')
+        )
+        self.test_kill_btn.pack(side=tk.LEFT, padx=3)
+        row += 1
+        
+        # Process Name field (needed for kill)
+        ttk.Label(meta_scrollable, text="Process Name:").grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
+        ttk.Entry(meta_scrollable, textvariable=self.process_name, width=25).grid(row=row, column=1, sticky=tk.W, pady=1)
+        ttk.Label(meta_scrollable, text="for Kill (e.g. cs2.exe)", font=('TkDefaultFont', 9), foreground="gray").grid(
+            row=row, column=2, sticky=tk.W, padx=3)
+        row += 1
+        
+        # Remaining fields
+        for label, var, hint in [
+            ("Process ID:", self.process_id, "cs2, sottr"),
+            ("Benchmark:", self.benchmark_name, ""),
+            ("Duration (s):", self.benchmark_duration, ""),
+            ("Startup Wait:", self.startup_wait, ""),
+            ("Resolution:", self.resolution, "1920x1080"),
+            ("Preset:", self.preset, "High, Ultra"),
+            ("Graphics API:", self.graphics_api, "DX11, DX12, Vulkan"),
+        ]:
+            ttk.Label(meta_scrollable, text=label).grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
+            ttk.Entry(meta_scrollable, textvariable=var, width=25).grid(row=row, column=1, sticky=tk.W, pady=1)
+            if hint:
+                ttk.Label(meta_scrollable, text=hint, font=('TkDefaultFont', 9), foreground="gray").grid(
+                    row=row, column=2, sticky=tk.W, padx=3)
+            row += 1
 
-        ttk.Label(meta_scrollable, text="Game Name:").grid(row=1, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.game_name, width=35).grid(row=1, column=1, sticky=tk.W, pady=2)
-
-        ttk.Label(meta_scrollable, text="Version:").grid(row=2, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.version, width=35).grid(row=2, column=1, sticky=tk.W, pady=2)
-
-        ttk.Label(meta_scrollable, text="Engine:").grid(row=3, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.engine, width=35).grid(row=3, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., Unreal Engine 5, Source 2, Unity",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=3, column=2, sticky=tk.W, padx=5)
-
-        # === EXECUTABLE INFO ===
-        ttk.Label(meta_scrollable, text="Executable Information", font=('TkDefaultFont', 9, 'bold')).grid(
-            row=4, column=0, columnspan=2, sticky=tk.W, pady=(10,5))
-
-        ttk.Label(meta_scrollable, text="Game Path:").grid(row=5, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.game_path, width=35).grid(row=5, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="Full path to game executable",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=5, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Process ID:").grid(row=6, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.process_id, width=35).grid(row=6, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="Short name (e.g., cs2, sottr)",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=6, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Process Name:").grid(row=7, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.process_name, width=35).grid(row=7, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., cs2.exe, sottr.exe",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=7, column=2, sticky=tk.W, padx=5)
-
-        # === BENCHMARK SETTINGS ===
-        ttk.Label(meta_scrollable, text="Benchmark Settings", font=('TkDefaultFont', 9, 'bold')).grid(
-            row=8, column=0, columnspan=2, sticky=tk.W, pady=(10,5))
-
-        ttk.Label(meta_scrollable, text="Benchmark Name:").grid(row=9, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.benchmark_name, width=35).grid(row=9, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., Built-in Benchmark, Custom Map",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=9, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Duration (sec):").grid(row=10, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.benchmark_duration, width=35).grid(row=10, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="Total benchmark duration in seconds",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=10, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Startup Wait (sec):").grid(row=11, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.startup_wait, width=35).grid(row=11, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="Time to wait for game to start",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=11, column=2, sticky=tk.W, padx=5)
-
-        # === GRAPHICS SETTINGS ===
-        ttk.Label(meta_scrollable, text="Graphics Settings", font=('TkDefaultFont', 9, 'bold')).grid(
-            row=12, column=0, columnspan=2, sticky=tk.W, pady=(10,5))
-
-        ttk.Label(meta_scrollable, text="Resolution:").grid(row=13, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.resolution, width=35).grid(row=13, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., 1920x1080, 2560x1440",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=13, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Graphics Preset:").grid(row=14, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.preset, width=35).grid(row=14, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., Low, Medium, High, Ultra",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=14, column=2, sticky=tk.W, padx=5)
-
-        ttk.Label(meta_scrollable, text="Graphics API:").grid(row=15, column=0, sticky=tk.W, pady=2, padx=(5,10))
-        ttk.Entry(meta_scrollable, textvariable=self.graphics_api, width=35).grid(row=15, column=1, sticky=tk.W, pady=2)
-        ttk.Label(meta_scrollable, text="e.g., DirectX 11, DirectX 12, Vulkan",
-                 font=('TkDefaultFont', 7), foreground="gray").grid(row=15, column=2, sticky=tk.W, padx=5)
+        # Separator line above ribbon
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(side=tk.BOTTOM, fill=tk.X, pady=2)
+        
+        # Screenshot history ribbon (expanded by default)
+        self.ribbon_panel = CollapsibleFrame(self.root, title="Screenshot History", collapsed=False)
+        self.ribbon_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2, before=None)
+        
+        # Scrollable ribbon inside collapsible
+        ribbon_canvas = tk.Canvas(self.ribbon_panel.content, height=60, bg="gray20")
+        ribbon_h_scroll = ttk.Scrollbar(self.ribbon_panel.content, orient=tk.HORIZONTAL, command=ribbon_canvas.xview)
+        self.ribbon_container = ttk.Frame(ribbon_canvas)
+        
+        self.ribbon_container.bind(
+            "<Configure>",
+            lambda e: ribbon_canvas.configure(scrollregion=ribbon_canvas.bbox("all"))
+        )
+        ribbon_canvas.create_window((0, 0), window=self.ribbon_container, anchor="nw")
+        ribbon_canvas.configure(xscrollcommand=ribbon_h_scroll.set)
+        
+        ribbon_h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        ribbon_canvas.pack(side=tk.TOP, fill=tk.X)
 
         # Status bar
         status_bar = ttk.Frame(self.root)
@@ -980,24 +1164,176 @@ class WorkflowBuilderGUI:
             self.gemma_frame.pack_forget()
             self.omni_frame.pack(fill=tk.X, pady=2)
 
-            # Restore omniparser connection and status if it exists
             if self.omniparser_connection:
                 self.vision_model = self.omniparser_connection
-                self.vision_status_label.config(text="Connected", foreground="green")
+                self.vision_status_label.config(text="●", foreground="green")
             else:
                 self.vision_model = None
-                self.vision_status_label.config(text="Not Connected", foreground="red")
+                self.vision_status_label.config(text="●", foreground="red")
         else:
             self.omni_frame.pack_forget()
             self.gemma_frame.pack(fill=tk.X, pady=2)
 
-            # Restore gemma connection and status if it exists
             if self.gemma_connection:
                 self.vision_model = self.gemma_connection
-                self.gemma_status_label.config(text="Connected", foreground="green")
+                self.gemma_status_label.config(text="●", foreground="green")
             else:
                 self.vision_model = None
-                self.gemma_status_label.config(text="Not Connected", foreground="red")
+                self.gemma_status_label.config(text="●", foreground="red")
+
+    def cycle_zoom(self):
+        """Cycle through zoom levels: 50% -> 60% -> 70% -> 80% -> 90% -> 100% -> 50%..."""
+        # Move to next zoom level (cycle back to start)
+        self.zoom_index = (self.zoom_index + 1) % len(self.zoom_levels)
+        zoom = self.zoom_levels[self.zoom_index]
+        
+        # Update button text
+        zoom_percent = int(zoom * 100)
+        self.zoom_btn_text.set(f"🔎 {zoom_percent}%")
+        
+        # Apply zoom to canvas
+        self.canvas.set_zoom(zoom)
+        
+        self.status_text.set(f"Zoom: {zoom_percent}%")
+
+    def refresh_ribbon(self):
+        """Refresh the screenshot history ribbon with thumbnail pairs."""
+        # Clear existing thumbnails
+        for widget in self.ribbon_container.winfo_children():
+            widget.destroy()
+        self.history_thumbnails.clear()
+        
+        THUMB_SIZE = (60, 34)  # Small thumbnails (16:9 aspect)
+        
+        for i, entry in enumerate(self.screenshot_history):
+            # Create pair frame
+            pair_frame = ttk.Frame(self.ribbon_container)
+            pair_frame.pack(side=tk.LEFT, padx=5, pady=2)
+            
+            # Captured thumbnail
+            if entry['captured'] and os.path.exists(entry['captured']):
+                try:
+                    img = Image.open(entry['captured'])
+                    img.thumbnail(THUMB_SIZE, Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self.history_thumbnails.append(photo)
+                    
+                    lbl = ttk.Label(pair_frame, image=photo)
+                    lbl.pack(side=tk.LEFT, padx=1)
+                    lbl.bind("<Button-1>", lambda e, path=entry['captured']: self._load_from_ribbon(path))
+                except Exception as ex:
+                    logger.warning(f"Failed to load thumbnail: {ex}")
+            
+            # Parsed thumbnail (if available)
+            if entry['parsed'] and os.path.exists(entry['parsed']):
+                try:
+                    img = Image.open(entry['parsed'])
+                    img.thumbnail(THUMB_SIZE, Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self.history_thumbnails.append(photo)
+                    
+                    lbl = ttk.Label(pair_frame, image=photo)
+                    lbl.pack(side=tk.LEFT, padx=1)
+                    lbl.bind("<Button-1>", lambda e, path=entry['parsed']: self._load_from_ribbon(path))
+                except Exception as ex:
+                    logger.warning(f"Failed to load parsed thumbnail: {ex}")
+            
+            # Separator between pairs
+            if i < len(self.screenshot_history) - 1:
+                ttk.Separator(self.ribbon_container, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+
+    def _load_from_ribbon(self, image_path):
+        """Load an image from ribbon click."""
+        try:
+            self.canvas.load_image(image_path, self.current_bboxes if image_path == self.current_screenshot else [])
+            self.status_text.set(f"Loaded: {os.path.basename(image_path)}")
+        except Exception as e:
+            logger.warning(f"Failed to load ribbon image: {e}")
+
+    def toggle_game_test(self):
+        """Toggle between launching game and killing it."""
+        if not self.network:
+            messagebox.showerror("Error", "Connect to SUT first!")
+            return
+        
+        if not self.game_running:
+            # LAUNCH mode
+            game_path = self.game_path.get()
+            if not game_path:
+                messagebox.showerror("Error", "Enter a Game Path first!")
+                return
+            
+            try:
+                self.status_text.set("Launching game...")
+                self.root.update()
+                
+                # Launch game via SUT
+                response = self.network.session.post(
+                    f"{self.network.base_url}/launch",
+                    json={"path": game_path, "process_id": self.process_id.get()},
+                    timeout=90
+                )
+                result = response.json()
+                
+                if result.get("status") == "success":
+                    self.game_running = True
+                    self.test_kill_btn.config(text="■ Kill", bg="#f44336")  # Red
+                    process_name = self.process_id.get() or os.path.basename(game_path)
+                    self.status_text.set(f"Game launched! Process: {process_name}")
+                else:
+                    messagebox.showerror("Launch Error", result.get("error", "Unknown error"))
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to launch: {e}")
+                self.status_text.set("Launch failed")
+        else:
+            # KILL mode - use existing /action with terminate_game
+            try:
+                self.status_text.set("Killing game...")
+                self.root.update()
+                
+                # Kill via existing action endpoint
+                result = self.network.send_action({"type": "terminate_game"})
+                
+                if result.get("status") == "success":
+                    self.status_text.set("Game terminated")
+                else:
+                    self.status_text.set(f"Terminate result: {result.get('status', 'unknown')}")
+                
+                # Reset button
+                self.game_running = False
+                self.test_kill_btn.config(text="▶ Test", bg="#4CAF50")  # Green
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to kill: {e}")
+    
+    def _check_game_process(self):
+        """Check if game process is still running."""
+        if not self.network or not self.game_running:
+            return
+        
+        process_name = self.process_name.get()
+        if not process_name:
+            return
+        
+        try:
+            response = self.network.session.post(
+                f"{self.network.base_url}/check_process",
+                json={"process_name": process_name},
+                timeout=5
+            )
+            result = response.json()
+            
+            if result.get("running"):
+                self.status_text.set(f"Running: {result.get('name')} (PID: {result.get('pid')})")
+            else:
+                # Process exited
+                self.game_running = False
+                self.test_kill_btn.config(text="▶ Test", bg="#4CAF50")
+                self.status_text.set("Game exited")
+        except Exception as e:
+            logger.warning(f"Process check failed: {e}")
+
 
     def connect_sut(self):
         """Connect to SUT service."""
@@ -1008,12 +1344,12 @@ class WorkflowBuilderGUI:
             self.network = NetworkManager(ip, port)
             self.screenshot_mgr = ScreenshotManager(self.network)
 
-            self.sut_status_label.config(text="Connected", foreground="green")
+            self.sut_status_label.config(text="●", foreground="green")
             self.status_text.set(f"Connected to SUT at {ip}:{port}")
             messagebox.showinfo("Success", "Connected to SUT successfully!")
 
         except Exception as e:
-            self.sut_status_label.config(text="Connection Failed", foreground="red")
+            self.sut_status_label.config(text="●", foreground="red")
             messagebox.showerror("Error", f"Failed to connect: {str(e)}")
 
     def connect_vision_model(self):
@@ -1038,17 +1374,17 @@ class WorkflowBuilderGUI:
                 model_name = "Gemma"
                 status_label = self.gemma_status_label
 
-            status_label.config(text="Connected", foreground="green")
+            status_label.config(text="●", foreground="green")
             self.status_text.set(f"Connected to {model_name} at {url}")
             messagebox.showinfo("Success", f"Connected to {model_name} successfully!")
 
         except Exception as e:
             if self.vision_var.get() == "omniparser":
-                self.vision_status_label.config(text="Connection Failed", foreground="red")
+                self.vision_status_label.config(text="●", foreground="red")
                 # Clear saved connection on failure
                 self.omniparser_connection = None
             else:
-                self.gemma_status_label.config(text="Connection Failed", foreground="red")
+                self.gemma_status_label.config(text="●", foreground="red")
                 # Clear saved connection on failure
                 self.gemma_connection = None
             messagebox.showerror("Error", f"Failed to connect to vision model: {str(e)}")
@@ -1068,6 +1404,13 @@ class WorkflowBuilderGUI:
 
             self.screenshot_mgr.capture(screenshot_path)
             self.current_screenshot = screenshot_path
+
+            # Add to history (parsed will be added later)
+            self.screenshot_history.append({
+                'captured': screenshot_path,
+                'parsed': None,
+                'timestamp': timestamp
+            })
 
             self.status_text.set(f"Screenshot captured: {screenshot_path}")
             messagebox.showinfo("Success", "Screenshot captured! Click 'Parse Screenshot' to analyze.")
@@ -1097,6 +1440,11 @@ class WorkflowBuilderGUI:
 
             # Display on canvas
             self.canvas.load_image(self.current_screenshot, self.current_bboxes)
+
+            # Update history with parsed image
+            if self.screenshot_history:
+                self.screenshot_history[-1]['parsed'] = annotation_path
+                self.refresh_ribbon()
 
             self.status_text.set(f"Found {len(self.current_bboxes)} UI elements")
             messagebox.showinfo("Success", f"Found {len(self.current_bboxes)} UI elements!\nClick on elements to select them.")
@@ -1241,6 +1589,15 @@ class WorkflowBuilderGUI:
         elif step.action_type == "wait":
             if hasattr(step, 'action_config') and step.action_config:
                 dialog.duration_var.set(str(step.action_config.get('duration', 2)))
+
+        elif step.action_type == "sideload":
+            if hasattr(step, 'action_config') and step.action_config:
+                dialog.sideload_path_var.set(step.action_config.get('path', ''))
+                args = step.action_config.get('args', [])
+                dialog.sideload_args_var.set(', '.join(args) if args else '')
+                dialog.sideload_timeout_var.set(str(step.action_config.get('timeout', 300)))
+                dialog.sideload_wait_var.set(step.action_config.get('wait_for_completion', True))
+                dialog.sideload_check_exit_var.set(step.action_config.get('check_exit_code', True))
 
         dialog.on_action_change()
 
@@ -1455,6 +1812,200 @@ class WorkflowBuilderGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to test action: {str(e)}")
 
+    def toggle_flow(self):
+        """Toggle between starting and stopping flow."""
+        if self.flow_running:
+            # Stop was requested
+            self.flow_stop_requested = True
+            self.status_text.set("Stopping flow...")
+        else:
+            # Start flow
+            self.test_full_flow()
+
+    def test_full_flow(self):
+        """Test full flow from selected step onwards."""
+        selection = self.steps_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a starting step!")
+            return
+
+        if not self.network:
+            messagebox.showwarning("Warning", "Please connect to SUT first!")
+            return
+
+        start_idx = selection[0]
+        total_steps = len(self.workflow_steps) - start_idx
+        
+        if not messagebox.askyesno("Test Full Flow", 
+            f"Execute {total_steps} steps starting from step {start_idx + 1}?"):
+            return
+
+        # Set running state and update button
+        self.flow_running = True
+        self.flow_stop_requested = False
+        self.flow_btn.config(text="■ Stop", bg="#f44336")  # Red
+        self.root.update()
+
+        failed_step = None
+        stopped = False
+        executed = 0
+        
+        for i in range(start_idx, len(self.workflow_steps)):
+            # Check for stop request
+            if self.flow_stop_requested:
+                stopped = True
+                break
+            
+            step = self.workflow_steps[i]
+            self.steps_listbox.selection_clear(0, tk.END)
+            self.steps_listbox.selection_set(i)
+            self.steps_listbox.see(i)
+            self.root.update()
+            
+            self.status_text.set(f"Executing step {i + 1}/{len(self.workflow_steps)}: {step.description}")
+            self.root.update()
+            
+            try:
+                # Execute step
+                if step.action_type == "find_and_click":
+                    # Capture and parse screenshot to find element dynamically
+                    if self.screenshot_mgr and self.vision_model:
+                        self.status_text.set(f"Step {i + 1}: Capturing screenshot...")
+                        self.root.update()
+                        
+                        # Capture screenshot
+                        import os
+                        os.makedirs("workflow_builder_temp", exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        screenshot_path = f"workflow_builder_temp/flow_step_{i+1}_{timestamp}.png"
+                        self.screenshot_mgr.capture(screenshot_path)
+                        
+                        if self.flow_stop_requested:
+                            stopped = True
+                            break
+                        
+                        self.status_text.set(f"Step {i + 1}: Parsing UI elements...")
+                        self.root.update()
+                        
+                        # Parse screenshot
+                        bboxes = self.vision_model.detect_ui_elements(screenshot_path)
+                        
+                        if self.flow_stop_requested:
+                            stopped = True
+                            break
+                        
+                        # Find matching element
+                        found_bbox = None
+                        search_text = getattr(step, 'text', '')
+                        search_type = getattr(step, 'element_type', 'any')
+                        match_mode = getattr(step, 'text_match', 'contains')
+                        
+                        for bbox in bboxes:
+                            type_match = search_type in ["any", bbox.element_type]
+                            
+                            if type_match and search_text:
+                                if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
+                                    found_bbox = bbox
+                                    break
+                                elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
+                                    found_bbox = bbox
+                                    break
+                                elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
+                                    found_bbox = bbox
+                                    break
+                        
+                        if found_bbox:
+                            x = found_bbox.x + found_bbox.width // 2
+                            y = found_bbox.y + found_bbox.height // 2
+                            self.status_text.set(f"Step {i + 1}: Found '{search_text}' at ({x}, {y})")
+                            self.root.update()
+                        else:
+                            # Fallback to stored bbox if available
+                            if step.selected_bbox:
+                                bbox = step.selected_bbox
+                                x = bbox.x + bbox.width // 2
+                                y = bbox.y + bbox.height // 2
+                                self.status_text.set(f"Step {i + 1}: Element not found, using stored coords ({x}, {y})")
+                                self.root.update()
+                            else:
+                                self.status_text.set(f"Step {i + 1}: Element '{search_text}' not found!")
+                                self.root.update()
+                                failed_step = (i + 1, f"Element '{search_text}' not found")
+                                break
+                    elif step.selected_bbox:
+                        # No vision model, use stored bbox
+                        bbox = step.selected_bbox
+                        x = bbox.x + bbox.width // 2
+                        y = bbox.y + bbox.height // 2
+                    else:
+                        self.status_text.set(f"Step {i + 1}: No vision model and no stored coords, skipping...")
+                        self.root.update()
+                        continue
+                    
+                    action = {"type": "click", "x": x, "y": y, "button": getattr(step, 'button', 'left')}
+                    self.network.send_action(action)
+                
+                elif step.action_config:
+                    # Handle wait actions locally to avoid network timeout
+                    if step.action_config.get('type') == 'wait':
+                        wait_duration = step.action_config.get('duration', 1)
+                        self.status_text.set(f"Step {i + 1}: Waiting {wait_duration}s...")
+                        self.root.update()
+                        import time
+                        for sec in range(int(wait_duration)):
+                            if self.flow_stop_requested:
+                                stopped = True
+                                break
+                            # Update status every 10 seconds only
+                            if sec % 10 == 0:
+                                self.status_text.set(f"Step {i + 1}: Waiting... {wait_duration - sec}s remaining")
+                                self.root.update()
+                            time.sleep(1)
+                        if stopped:
+                            break
+                    else:
+                        self.network.send_action(step.action_config)
+                
+                else:
+                    self.status_text.set(f"Step {i + 1}: No action configured, skipping...")
+                    self.root.update()
+                    continue
+                
+                executed += 1
+                
+                # Wait for expected delay (in small chunks to check stop)
+                delay = getattr(step, 'expected_delay', 1)
+                import time
+                for _ in range(int(delay * 10)):
+                    if self.flow_stop_requested:
+                        stopped = True
+                        break
+                    time.sleep(0.1)
+                    self.root.update()
+                
+                if stopped:
+                    break
+                
+            except Exception as e:
+                failed_step = (i + 1, str(e))
+                break
+        
+        # Reset button state
+        self.flow_running = False
+        self.flow_stop_requested = False
+        self.flow_btn.config(text="▶▶ Flow", bg="#2E7D32")  # Green
+        self.root.update()
+        
+        if stopped:
+            self.status_text.set(f"Flow stopped after {executed} steps")
+            messagebox.showinfo("Stopped", f"Flow stopped after {executed} steps")
+        elif failed_step:
+            messagebox.showerror("Flow Failed", f"Step {failed_step[0]} failed: {failed_step[1]}")
+            self.status_text.set(f"Flow failed at step {failed_step[0]}")
+        else:
+            messagebox.showinfo("Success", f"Executed {total_steps} steps successfully!")
+            self.status_text.set(f"Flow complete: {total_steps} steps executed")
+
     def open_screenshots_folder(self):
         """Open the screenshots folder in file explorer."""
         import os
@@ -1523,10 +2074,19 @@ class WorkflowBuilderGUI:
                 metadata["graphics_api"] = self.graphics_api.get()
 
             yaml_data = {
-                "metadata": metadata,
-                "steps": {}
+                "metadata": metadata
             }
 
+            # Add hooks if any are defined
+            if self.hooks.get("pre") or self.hooks.get("post"):
+                yaml_data["hooks"] = {}
+                if self.hooks.get("pre"):
+                    yaml_data["hooks"]["pre"] = self.hooks["pre"]
+                if self.hooks.get("post"):
+                    yaml_data["hooks"]["post"] = self.hooks["post"]
+
+            # Add steps
+            yaml_data["steps"] = {}
             for step in self.workflow_steps:
                 yaml_data["steps"][step.step_number] = step.to_dict()
 
@@ -1578,6 +2138,16 @@ class WorkflowBuilderGUI:
             self.engine.set(metadata.get("engine", ""))
             self.graphics_api.set(metadata.get("graphics_api", "DirectX 11"))
 
+            # Load hooks
+            hooks_data = yaml_data.get("hooks", {})
+            self.hooks = {
+                "pre": hooks_data.get("pre", []),
+                "post": hooks_data.get("post", [])
+            }
+            # Update hooks display if exists
+            if hasattr(self, 'hooks_list'):
+                self._refresh_hooks_display()
+
             # Load steps
             self.workflow_steps = []
             steps = yaml_data.get("steps", {})
@@ -1628,6 +2198,322 @@ class WorkflowBuilderGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load YAML: {str(e)}")
 
+    def show_hooks_editor(self):
+        """Show hooks editor dialog."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Hooks - Pre/Post Automation Scripts")
+        dialog.geometry("700x550")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Create notebook for tabs
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Pre-hooks tab
+        pre_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(pre_frame, text="Pre-Hooks (Before Step 1)")
+
+        ttk.Label(pre_frame, text="Scripts that run before automation starts:",
+                 font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+
+        pre_list_frame = ttk.Frame(pre_frame)
+        pre_list_frame.pack(fill=tk.BOTH, expand=True)
+
+        pre_listbox = tk.Listbox(pre_list_frame, height=8)
+        pre_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        pre_scroll = ttk.Scrollbar(pre_list_frame, orient=tk.VERTICAL, command=pre_listbox.yview)
+        pre_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        pre_listbox.config(yscrollcommand=pre_scroll.set)
+
+        # Populate pre-hooks
+        for hook in self.hooks.get("pre", []):
+            persistent = " [PERSISTENT]" if hook.get("persistent") else ""
+            pre_listbox.insert(tk.END, f"{hook.get('path', 'Unknown')}{persistent}")
+
+        pre_btn_frame = ttk.Frame(pre_frame)
+        pre_btn_frame.pack(fill=tk.X, pady=5)
+
+        def add_pre_hook():
+            self._add_hook_dialog(pre_listbox, "pre")
+
+        def remove_pre_hook():
+            sel = pre_listbox.curselection()
+            if sel:
+                idx = sel[0]
+                pre_listbox.delete(idx)
+                self.hooks["pre"].pop(idx)
+
+        ttk.Button(pre_btn_frame, text="+ Add Hook", command=add_pre_hook).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pre_btn_frame, text="- Remove", command=remove_pre_hook).pack(side=tk.LEFT, padx=2)
+
+        # Post-hooks tab
+        post_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(post_frame, text="Post-Hooks (After Last Step)")
+
+        ttk.Label(post_frame, text="Scripts that run after automation completes:",
+                 font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+
+        post_list_frame = ttk.Frame(post_frame)
+        post_list_frame.pack(fill=tk.BOTH, expand=True)
+
+        post_listbox = tk.Listbox(post_list_frame, height=8)
+        post_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        post_scroll = ttk.Scrollbar(post_list_frame, orient=tk.VERTICAL, command=post_listbox.yview)
+        post_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        post_listbox.config(yscrollcommand=post_scroll.set)
+
+        # Populate post-hooks
+        for hook in self.hooks.get("post", []):
+            post_listbox.insert(tk.END, f"{hook.get('path', 'Unknown')}")
+
+        post_btn_frame = ttk.Frame(post_frame)
+        post_btn_frame.pack(fill=tk.X, pady=5)
+
+        def add_post_hook():
+            self._add_hook_dialog(post_listbox, "post")
+
+        def remove_post_hook():
+            sel = post_listbox.curselection()
+            if sel:
+                idx = sel[0]
+                post_listbox.delete(idx)
+                self.hooks["post"].pop(idx)
+
+        ttk.Button(post_btn_frame, text="+ Add Hook", command=add_post_hook).pack(side=tk.LEFT, padx=2)
+        ttk.Button(post_btn_frame, text="- Remove", command=remove_post_hook).pack(side=tk.LEFT, padx=2)
+
+        # Close button
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
+
+    def _add_hook_dialog(self, listbox, hook_type):
+        """Show dialog to add a new hook."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Add {'Pre' if hook_type == 'pre' else 'Post'}-Hook")
+        dialog.geometry("500x350")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Script Path:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=5)
+        path_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=path_var, width=50).grid(row=0, column=1, sticky=tk.W, padx=10, pady=5)
+
+        ttk.Label(dialog, text="Arguments (comma-separated):").grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
+        args_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=args_var, width=50).grid(row=1, column=1, sticky=tk.W, padx=10, pady=5)
+
+        ttk.Label(dialog, text="Timeout (seconds):").grid(row=2, column=0, sticky=tk.W, padx=10, pady=5)
+        timeout_var = tk.StringVar(value="300")
+        ttk.Entry(dialog, textvariable=timeout_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=10, pady=5)
+
+        ttk.Label(dialog, text="Working Directory:").grid(row=3, column=0, sticky=tk.W, padx=10, pady=5)
+        workdir_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=workdir_var, width=50).grid(row=3, column=1, sticky=tk.W, padx=10, pady=5)
+
+        persistent_var = tk.BooleanVar(value=False)
+        if hook_type == "pre":
+            ttk.Checkbutton(dialog, text="Persistent (runs throughout automation, terminated at end)",
+                           variable=persistent_var).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=10, pady=5)
+
+        def save_hook():
+            hook = {
+                "path": path_var.get(),
+            }
+            args_str = args_var.get().strip()
+            if args_str:
+                hook["args"] = [a.strip() for a in args_str.split(",")]
+            if timeout_var.get():
+                hook["timeout"] = int(timeout_var.get())
+            if workdir_var.get():
+                hook["working_dir"] = workdir_var.get()
+            if hook_type == "pre" and persistent_var.get():
+                hook["persistent"] = True
+
+            self.hooks[hook_type].append(hook)
+            persistent = " [PERSISTENT]" if hook.get("persistent") else ""
+            listbox.insert(tk.END, f"{hook['path']}{persistent}")
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Add Hook", command=save_hook).grid(row=5, column=0, columnspan=2, pady=20)
+
+    def show_yaml_reference(self):
+        """Show YAML settings reference dialog."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("YAML Reference - All Available Settings")
+        dialog.geometry("900x700")
+        dialog.transient(self.root)
+
+        # Create header with yellow background
+        header_frame = tk.Frame(dialog, bg="#FFD700", padx=10, pady=10)
+        header_frame.pack(fill=tk.X)
+        tk.Label(header_frame, text="📖 YAML Configuration Reference",
+                font=('Segoe UI', 14, 'bold'), bg="#FFD700").pack()
+        tk.Label(header_frame, text="All available settings for game automation workflows",
+                font=('Segoe UI', 10), bg="#FFD700").pack()
+
+        # Scrollable text widget
+        text_frame = ttk.Frame(dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, font=('Consolas', 10))
+        text.pack(fill=tk.BOTH, expand=True)
+
+        reference = '''
+# ============================================================================
+# YAML CONFIGURATION REFERENCE
+# ============================================================================
+
+# METADATA SECTION
+# ----------------
+metadata:
+  game_name: "Game Title"           # Display name
+  path: "12345"                     # Steam App ID or exe path
+  process_id: "game"                # Process name to wait for
+  process_name: "Game.exe"          # Full process name
+  version: "1.0"                    # Config version
+  benchmark_duration: 120           # Benchmark runtime in seconds
+  startup_wait: 30                  # Wait after game launch
+  resolution: "1920x1080"           # Target resolution
+  preset: "High"                    # Graphics preset name
+  engine: "Unreal Engine 5"         # Game engine
+  graphics_api: "DirectX 12"        # Graphics API
+
+# HOOKS SECTION (NEW!)
+# --------------------
+hooks:
+  pre:
+    # Non-persistent hook (runs and waits before step 1)
+    - path: "C:\\Scripts\\setup.bat"
+      args: ["--profile", "gaming"]
+      timeout: 30
+      working_dir: "C:\\Scripts"
+
+    # Persistent hook (starts before step 1, stops after last step)
+    - path: "C:\\Tools\\trace.exe"
+      args: ["--output", "C:\\Logs\\trace.etl"]
+      persistent: true              # KEY: Runs throughout automation
+
+  post:
+    # Runs after all steps complete
+    - path: "C:\\Scripts\\collect.py"
+      args: ["--run-id", "test123"]
+      timeout: 60
+
+# STEPS SECTION
+# -------------
+steps:
+  1:
+    description: "Step description"
+    optional: false                 # If true, failure won't stop workflow
+    expected_delay: 2               # Wait after step (seconds)
+    timeout: 20                     # Max time to find element
+
+    # FIND ELEMENT (for click/keyboard actions)
+    find:
+      type: "icon"                  # icon, text, or any
+      text: "PLAY"                  # Text to match
+      text_match: "contains"        # contains, exact, startswith, endswith
+
+    # ACTION TYPE: click
+    action:
+      type: "click"
+      button: "left"                # left, right, middle
+      move_duration: 0.3            # Mouse move time
+      click_delay: 0.1              # Delay before click
+      offset_x: 0                   # Pixel offset from center
+      offset_y: 0
+
+    # ACTION TYPE: double_click / right_click / middle_click
+    action:
+      type: "double_click"          # or right_click, middle_click
+
+    # ACTION TYPE: key (single key press)
+    action:
+      type: "key"
+      key: "enter"                  # Key name (enter, escape, f1, etc.)
+
+    # ACTION TYPE: hotkey (key combination)
+    action:
+      type: "hotkey"
+      keys: ["ctrl", "s"]           # Keys to press together
+
+    # ACTION TYPE: text (type text)
+    action:
+      type: "text"
+      text: "Hello World"           # Text to type
+      clear_first: false            # Ctrl+A before typing
+      char_delay: 0.05              # Delay between characters
+
+    # ACTION TYPE: scroll
+    action:
+      type: "scroll"
+      direction: "down"             # up or down
+      clicks: 3                     # Number of scroll clicks
+
+    # ACTION TYPE: drag
+    action:
+      type: "drag"
+      dest_x: 500                   # Drop X coordinate
+      dest_y: 300                   # Drop Y coordinate
+      duration: 1.0                 # Drag duration
+
+    # ACTION TYPE: wait
+    action:
+      type: "wait"
+      duration: 10                  # Seconds to wait
+
+    # ACTION TYPE: sideload (NEW!)
+    action:
+      type: "sideload"
+      path: "C:\\Scripts\\configure.ps1"    # Script path
+      args: ["-Width", "1920"]              # Arguments
+      timeout: 300                          # Max execution time
+      wait_for_completion: true             # Block until done
+      check_exit_code: true                 # Fail on non-zero exit
+      working_dir: "C:\\Scripts"            # Working directory
+      shell: false                          # Run in shell (auto-detect)
+
+    # VERIFICATION (optional)
+    verify_success:
+      - type: "icon"
+        text: "Main Menu"
+        text_match: "contains"
+
+# FALLBACKS SECTION
+# -----------------
+fallbacks:
+  general:
+    action: "key"
+    key: "escape"
+    expected_delay: 1
+
+# ============================================================================
+# HOOK FIELDS REFERENCE
+# ============================================================================
+# path:        (required) Path to executable (.py, .bat, .ps1, .exe, .cmd)
+# args:        (optional) List of command line arguments
+# timeout:     (optional) Max seconds to wait (default: 300)
+# working_dir: (optional) Working directory (default: parent of path)
+# persistent:  (optional) If true, runs throughout automation (pre-hooks only)
+# shell:       (optional) Run in shell (auto-detected from extension)
+
+# ============================================================================
+# SIDELOAD FIELDS REFERENCE
+# ============================================================================
+# path:                (required) Path to executable
+# args:                (optional) List of command line arguments
+# timeout:             (optional) Max seconds to wait (default: 300)
+# wait_for_completion: (optional) Block until done (default: true)
+# check_exit_code:     (optional) Fail step if non-zero exit (default: true)
+# working_dir:         (optional) Working directory
+# shell:               (optional) Run in shell (auto-detected)
+'''
+        text.insert(tk.END, reference)
+        text.config(state=tk.DISABLED)
+
+        # Close button
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
+
     def new_workflow(self):
         """Create new workflow."""
         if self.workflow_steps and not messagebox.askyesno("Confirm",
@@ -1635,6 +2521,7 @@ class WorkflowBuilderGUI:
             return
 
         self.workflow_steps = []
+        self.hooks = {"pre": [], "post": []}  # Reset hooks
         self.refresh_steps_list()
 
         # Reset all metadata fields
