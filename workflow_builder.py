@@ -173,6 +173,27 @@ class InteractiveCanvas(tk.Canvas):
         self.bind("<Button-1>", self.on_click)
         self.bind("<Motion>", self.on_hover)
 
+        # Zoom: Ctrl+Scroll (works for touchpad pinch on Windows too)
+        self.bind("<Control-MouseWheel>", self.on_zoom)
+        self.bind("<Control-Button-4>", self.on_zoom)   # Linux scroll up
+        self.bind("<Control-Button-5>", self.on_zoom)   # Linux scroll down
+
+        # Pan: two-finger scroll on touchpad / mouse wheel
+        self.bind("<MouseWheel>", self.on_scroll_y)
+        self.bind("<Shift-MouseWheel>", self.on_scroll_x)
+        self.bind("<Button-4>", self.on_scroll_y)        # Linux scroll up
+        self.bind("<Button-5>", self.on_scroll_y)        # Linux scroll down
+
+        # Pan: middle mouse button drag
+        self.bind("<Button-2>", self.on_pan_start)
+        self.bind("<B2-Motion>", self.on_pan_move)
+        self._pan_start_x = 0
+        self._pan_start_y = 0
+
+        # Min/max zoom limits
+        self._zoom_min = 0.1
+        self._zoom_max = 5.0
+
     def set_zoom(self, scale: float):
         """Set zoom scale and redraw."""
         self.zoom_scale = scale
@@ -289,16 +310,76 @@ class InteractiveCanvas(tk.Canvas):
 
         self.config(cursor="")
 
+    def on_zoom(self, event):
+        """Zoom in/out with Ctrl+Scroll or touchpad pinch."""
+        if event.num == 4 or event.delta > 0:
+            factor = 1.1
+        else:
+            factor = 0.9
+
+        new_scale = self.zoom_scale * factor
+        new_scale = max(self._zoom_min, min(self._zoom_max, new_scale))
+
+        if new_scale != self.zoom_scale:
+            # Zoom toward cursor position
+            canvas_x = self.canvasx(event.x)
+            canvas_y = self.canvasy(event.y)
+
+            self.zoom_scale = new_scale
+            if self.image:
+                self.draw_bboxes()
+
+            # Adjust scroll to keep cursor point stable
+            new_x = canvas_x * factor
+            new_y = canvas_y * factor
+            self.xview_moveto((new_x - event.x) / (self.image.width * self.zoom_scale) if self.image else 0)
+            self.yview_moveto((new_y - event.y) / (self.image.height * self.zoom_scale) if self.image else 0)
+
+    def on_scroll_y(self, event):
+        """Vertical pan with two-finger scroll or mouse wheel."""
+        if event.num == 4:
+            self.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.yview_scroll(1, "units")
+        else:
+            self.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def on_scroll_x(self, event):
+        """Horizontal pan with Shift+scroll."""
+        if event.delta > 0:
+            self.xview_scroll(-1, "units")
+        else:
+            self.xview_scroll(1, "units")
+
+    def on_pan_start(self, event):
+        """Start middle-mouse pan."""
+        self._pan_start_x = event.x
+        self._pan_start_y = event.y
+        self.config(cursor="fleur")
+
+    def on_pan_move(self, event):
+        """Pan by dragging with middle mouse button."""
+        dx = self._pan_start_x - event.x
+        dy = self._pan_start_y - event.y
+        self._pan_start_x = event.x
+        self._pan_start_y = event.y
+        self.xview_scroll(int(dx / 5), "units")
+        self.yview_scroll(int(dy / 5), "units")
+
 
 class ActionDefinitionDialog(tk.Toplevel):
     """Enhanced dialog for defining all action types with verification support."""
 
-    def __init__(self, parent, bbox: Optional[BoundingBox] = None):
+    def __init__(self, parent, bbox: Optional[BoundingBox] = None, mode: str = "add"):
         super().__init__(parent)
         self.title("Define Action")
-        self.geometry("640x1050")
+        screen_h = parent.winfo_screenheight()
+        win_h = min(1050, screen_h - 80)
+        self.geometry(f"680x{win_h}")
+        self.resizable(True, True)
         self.result = None
         self.bbox = bbox
+        self.mode = mode
         self.verify_elements = []  # List of elements to verify
 
         self.create_widgets()
@@ -321,6 +402,47 @@ class ActionDefinitionDialog(tk.Toplevel):
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        # Bind mousewheel / touchpad scroll to the canvas (smooth scrolling)
+        def _on_mousewheel(event):
+            # yview_moveto uses fractions (0.0–1.0), enabling sub-unit precision
+            # Dividing by canvas height gives a speed proportional to visible area
+            canvas_h = canvas.winfo_height() or 600
+            delta_fraction = -event.delta / (4 * canvas_h)
+            new_top = max(0.0, min(1.0, canvas.yview()[0] + delta_fraction))
+            canvas.yview_moveto(new_top)
+
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # === SELECTED ELEMENT BANNER ===
+        if self.bbox:
+            el_frame = ttk.Frame(scrollable_frame, relief="solid")
+            el_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+            # Green header bar
+            header = tk.Label(el_frame, text="✔ Element Selected", bg="#4CAF50", fg="white",
+                              font=('TkDefaultFont', 10, 'bold'), anchor=tk.W, padx=8, pady=3)
+            header.pack(fill=tk.X)
+            # Details row
+            detail_text = (
+                f"  Type: {self.bbox.element_type}   "
+                f"Text: \"{self.bbox.element_text}\"   "
+                f"Position: ({self.bbox.x}, {self.bbox.y})   "
+                f"Size: {self.bbox.width} × {self.bbox.height}"
+            )
+            tk.Label(el_frame, text=detail_text, bg="#E8F5E9", fg="#1B5E20",
+                     font=('TkDefaultFont', 10), anchor=tk.W, padx=8, pady=4).pack(fill=tk.X)
+        else:
+            el_frame = ttk.Frame(scrollable_frame, relief="solid")
+            el_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+            header = tk.Label(el_frame, text="⚠ No Element Selected",
+                              bg="#FF9800", fg="white",
+                              font=('TkDefaultFont', 10, 'bold'), anchor=tk.W, padx=8, pady=3)
+            header.pack(fill=tk.X)
+            tk.Label(el_frame,
+                     text="  Click an element on the canvas before adding this step to attach coordinates.",
+                     bg="#FFF3E0", fg="#E65100",
+                     font=('TkDefaultFont', 10), anchor=tk.W, padx=8, pady=4).pack(fill=tk.X)
 
         # === DESCRIPTION ===
         desc_frame = ttk.LabelFrame(scrollable_frame, text="Step Description", padding=10)
@@ -582,7 +704,8 @@ class ActionDefinitionDialog(tk.Toplevel):
         btn_frame = ttk.Frame(scrollable_frame)
         btn_frame.pack(fill=tk.X, padx=10, pady=10)
 
-        ttk.Button(btn_frame, text="OK", command=self.on_ok, width=12).pack(side=tk.RIGHT, padx=5)
+        save_label = "Add Step" if self.mode == "add" else "Save Changes"
+        ttk.Button(btn_frame, text=save_label, command=self.on_ok, width=14).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=self.on_cancel, width=12).pack(side=tk.RIGHT)
 
         # Initialize - show initial action settings
@@ -850,8 +973,8 @@ class WorkflowBuilderGUI:
         self.sut_port = tk.StringVar(value="8080")
 
         # Vision model connections
-        self.omniparser_ip = tk.StringVar(value="192.168.50.161")
-        self.omniparser_port = tk.StringVar(value="9000")
+        self.omniparser_ip = tk.StringVar(value="192.168.50.241")
+        self.omniparser_port = tk.StringVar(value="8000")
         self.gemma_ip = tk.StringVar(value="localhost")
         self.gemma_port = tk.StringVar(value="1234")
 
@@ -983,6 +1106,12 @@ class WorkflowBuilderGUI:
         self.zoom_btn = ttk.Button(btn_frame, textvariable=self.zoom_btn_text, command=self.cycle_zoom, width=8)
         self.zoom_btn.pack(side=tk.LEFT, padx=5)
 
+        # Clear selection button
+        self.clear_sel_btn = tk.Button(btn_frame, text="Clear Selection", command=self.clear_element_selection,
+                                       bg="#e53935", fg="white", font=('TkDefaultFont', 10, 'bold'),
+                                       relief=tk.FLAT, padx=6, state=tk.DISABLED)
+        self.clear_sel_btn.pack(side=tk.LEFT, padx=5)
+
         # Screenshot display
         self.screenshot_label_text = tk.StringVar(value="Screenshot (Click on elements) - Zoom: 100%")
         screenshot_frame = ttk.LabelFrame(left_panel, text="Screenshot (Click on elements)", padding=5)
@@ -1066,13 +1195,38 @@ class WorkflowBuilderGUI:
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.steps_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=("Consolas", 11), height=20)
+        self.steps_listbox = ttk.Treeview(list_frame, yscrollcommand=scrollbar.set,
+                                           selectmode="browse", show="tree")
+        self.steps_listbox.column("#0", stretch=True)
+        self.steps_listbox.tag_configure("verify", foreground="#0288D1")
         self.steps_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.steps_listbox.yview)
 
-        # COLLAPSIBLE Metadata Panel (expanded, takes remaining space)
+        # COLLAPSIBLE Test Output Panel
+        self.output_panel = CollapsibleFrame(right_panel, title="Test Output")
+        self.output_panel.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+        output_content = self.output_panel.content
+
+        out_btn_frame = ttk.Frame(output_content)
+        out_btn_frame.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(out_btn_frame, text="Clear", command=self.clear_test_output).pack(side=tk.RIGHT, padx=2)
+
+        self.output_text = scrolledtext.ScrolledText(
+            output_content, height=8, width=40,
+            bg="#1e1e1e", fg="#e0e0e0", font=("Consolas", 9),
+            insertbackground="white"
+        )
+        self.output_text.pack(fill=tk.BOTH, expand=True)
+        self.output_text.tag_configure("pass",   foreground="#66BB6A")
+        self.output_text.tag_configure("fail",   foreground="#EF5350")
+        self.output_text.tag_configure("warn",   foreground="#FFA726")
+        self.output_text.tag_configure("info",   foreground="#42A5F5")
+        self.output_text.tag_configure("header", foreground="#FFFFFF", font=("Consolas", 9, "bold"))
+        self.output_text.tag_configure("time",   foreground="#757575")
+
+        # COLLAPSIBLE Metadata Panel
         self.metadata_panel = CollapsibleFrame(right_panel, title="Workflow Metadata", collapsed=False)
-        self.metadata_panel.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+        self.metadata_panel.pack(fill=tk.X, padx=5, pady=2)
         meta_content = self.metadata_panel.content
 
         # Create canvas and scrollbar for metadata
@@ -1096,7 +1250,7 @@ class WorkflowBuilderGUI:
         
         # Regular fields before Game Path
         for label, var, hint in [
-            ("Game Name:", self.game_name, ""),
+            ("App Name:", self.game_name, ""),
             ("Version:", self.version, ""),
             ("Engine:", self.engine, "UE5, Source 2"),
         ]:
@@ -1108,7 +1262,7 @@ class WorkflowBuilderGUI:
             row += 1
         
         # Game Path with Test/Kill button
-        ttk.Label(meta_scrollable, text="Game Path:").grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
+        ttk.Label(meta_scrollable, text="App Path:").grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
         game_path_frame = ttk.Frame(meta_scrollable)
         game_path_frame.grid(row=row, column=1, columnspan=2, sticky=tk.W, pady=1)
         ttk.Entry(game_path_frame, textvariable=self.game_path, width=20).pack(side=tk.LEFT)
@@ -1126,14 +1280,14 @@ class WorkflowBuilderGUI:
         # Process Name field (needed for kill)
         ttk.Label(meta_scrollable, text="Process Name:").grid(row=row, column=0, sticky=tk.W, pady=1, padx=2)
         ttk.Entry(meta_scrollable, textvariable=self.process_name, width=25).grid(row=row, column=1, sticky=tk.W, pady=1)
-        ttk.Label(meta_scrollable, text="for Kill (e.g. cs2.exe)", font=('TkDefaultFont', 9), foreground="gray").grid(
+        ttk.Label(meta_scrollable, text="for Kill (e.g. Fusion360.exe)", font=('TkDefaultFont', 9), foreground="gray").grid(
             row=row, column=2, sticky=tk.W, padx=3)
         row += 1
         
         # Remaining fields
         for label, var, hint in [
-            ("Process ID:", self.process_id, "cs2, sottr"),
-            ("Benchmark:", self.benchmark_name, ""),
+            ("Process ID:", self.process_id, "fusion360, Revit"),
+            ("Test Scenario:", self.benchmark_name, ""),
             ("Duration (s):", self.benchmark_duration, ""),
             ("Startup Wait:", self.startup_wait, ""),
             ("Resolution:", self.resolution, "1920x1080"),
@@ -1364,11 +1518,11 @@ class WorkflowBuilderGUI:
 
             self.sut_status_label.config(text="●", foreground="green")
             self.status_text.set(f"Connected to SUT at {ip}:{port}")
-            messagebox.showinfo("Success", "Connected to SUT successfully!")
+            self.log_result(f"Connected to SUT at {ip}:{port}", "pass")
 
         except Exception as e:
             self.sut_status_label.config(text="●", foreground="red")
-            messagebox.showerror("Error", f"Failed to connect: {str(e)}")
+            self.log_result(f"SUT connection failed: {e}", "fail")
 
     def connect_vision_model(self):
         """Connect to vision model service and save connection state."""
@@ -1394,7 +1548,7 @@ class WorkflowBuilderGUI:
 
             status_label.config(text="●", foreground="green")
             self.status_text.set(f"Connected to {model_name} at {url}")
-            messagebox.showinfo("Success", f"Connected to {model_name} successfully!")
+            self.log_result(f"Connected to {model_name} at {url}", "pass")
 
         except Exception as e:
             if self.vision_var.get() == "omniparser":
@@ -1405,12 +1559,12 @@ class WorkflowBuilderGUI:
                 self.gemma_status_label.config(text="●", foreground="red")
                 # Clear saved connection on failure
                 self.gemma_connection = None
-            messagebox.showerror("Error", f"Failed to connect to vision model: {str(e)}")
+            self.log_result(f"✗ Vision model connection failed: {e}", "fail")
 
     def capture_screenshot(self):
         """Capture screenshot from SUT."""
         if not self.screenshot_mgr:
-            messagebox.showwarning("Warning", "Please connect to SUT first!")
+            self.log_result("⚠ Please connect to SUT first!", "warn")
             return
 
         try:
@@ -1431,19 +1585,19 @@ class WorkflowBuilderGUI:
             })
 
             self.status_text.set(f"Screenshot captured: {screenshot_path}")
-            messagebox.showinfo("Success", "Screenshot captured! Click 'Parse Screenshot' to analyze.")
+            self.log_result(f"Screenshot captured → {screenshot_path}", "pass")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to capture screenshot: {str(e)}")
+            self.log_result(f"Screenshot capture failed: {e}", "fail")
 
     def parse_screenshot(self):
         """Parse screenshot with vision model."""
         if not self.current_screenshot:
-            messagebox.showwarning("Warning", "Please capture a screenshot first!")
+            self.log_result("Please capture a screenshot first!", "warn")
             return
 
         if not self.vision_model:
-            messagebox.showwarning("Warning", "Please connect to Vision Model first!")
+            self.log_result("Please connect to Vision Model first!", "warn")
             return
 
         try:
@@ -1465,10 +1619,10 @@ class WorkflowBuilderGUI:
                 self.refresh_ribbon()
 
             self.status_text.set(f"Found {len(self.current_bboxes)} UI elements")
-            messagebox.showinfo("Success", f"Found {len(self.current_bboxes)} UI elements!\nClick on elements to select them.")
+            self.log_result(f"Parsed screenshot — {len(self.current_bboxes)} UI elements detected", "pass")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to parse screenshot: {str(e)}")
+            self.log_result(f"Parse failed: {e}", "fail")
             self.status_text.set("Parse failed")
 
     def on_element_selected(self, bbox: BoundingBox):
@@ -1484,6 +1638,15 @@ class WorkflowBuilderGUI:
         self.details_text.insert(1.0, details)
 
         self.status_text.set(f"Selected: {bbox.element_type} '{bbox.element_text}'")
+        self.clear_sel_btn.config(state=tk.NORMAL)
+
+    def clear_element_selection(self):
+        """Clear the currently selected element on the canvas."""
+        self.canvas.selected_bbox = None
+        self.canvas.draw_bboxes()
+        self.details_text.delete(1.0, tk.END)
+        self.status_text.set("Selection cleared")
+        self.clear_sel_btn.config(state=tk.DISABLED)
 
     def add_step(self):
         """Add new workflow step with support for all action types."""
@@ -1491,7 +1654,7 @@ class WorkflowBuilderGUI:
         if self.canvas.selected_bbox is not None:
             selected_bbox = self.current_bboxes[self.canvas.selected_bbox]
 
-        dialog = ActionDefinitionDialog(self.root, selected_bbox)
+        dialog = ActionDefinitionDialog(self.root, selected_bbox, mode="add")
         self.root.wait_window(dialog)
 
         if dialog.result:
@@ -1534,15 +1697,20 @@ class WorkflowBuilderGUI:
 
     def edit_step(self):
         """Edit selected step with support for all action types."""
-        selection = self.steps_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a step to edit!")
+        idx = self._get_selected_step_index()
+        if idx is None:
+            self.log_result("Please select a step to edit!", "warn")
             return
 
-        idx = selection[0]
         step = self.workflow_steps[idx]
 
-        dialog = ActionDefinitionDialog(self.root, step.selected_bbox)
+        # If a new element is selected on the canvas, use it; otherwise keep stored bbox
+        canvas_bbox = None
+        if self.canvas.selected_bbox is not None:
+            canvas_bbox = self.current_bboxes[self.canvas.selected_bbox]
+        effective_bbox = canvas_bbox if canvas_bbox is not None else step.selected_bbox
+
+        dialog = ActionDefinitionDialog(self.root, effective_bbox, mode="edit")
 
         # Pre-fill dialog
         dialog.action_var.set(step.action_type)
@@ -1557,60 +1725,98 @@ class WorkflowBuilderGUI:
             for elem in step.verify_elements:
                 dialog.verify_listbox.insert(tk.END, f"{elem['type']}: '{elem['text']}' ({elem['text_match']})")
 
-        # Pre-fill action-specific fields
-        if step.action_type == "find_and_click":
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
-            if hasattr(step, 'button'):
-                dialog.button_var.set(step.button)
-            if hasattr(step, 'move_duration'):
-                dialog.move_duration_var.set(str(step.move_duration))
+        # If NO new canvas element was selected, restore the old step's element fields.
+        # If a canvas element IS selected, its type/text were already set by __init__ from bbox.
+        if canvas_bbox is None:
+            if step.action_type == "find_and_click":
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
+                if hasattr(step, 'button'):
+                    dialog.button_var.set(step.button)
+                if hasattr(step, 'move_duration'):
+                    dialog.move_duration_var.set(str(step.move_duration))
 
-        elif step.action_type in ["right_click", "double_click", "middle_click"]:
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
+            elif step.action_type in ["right_click", "double_click", "middle_click"]:
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
 
-        elif step.action_type == "text":
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
-            if hasattr(step, 'action_config') and step.action_config:
-                dialog.type_text_var.set(step.action_config.get('text', ''))
-                dialog.clear_first_var.set(step.action_config.get('clear_first', False))
+            elif step.action_type == "text":
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.type_text_var.set(step.action_config.get('text', ''))
+                    dialog.clear_first_var.set(step.action_config.get('clear_first', False))
 
-        elif step.action_type == "drag":
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
-            if hasattr(step, 'action_config') and step.action_config:
-                dialog.dest_x_var.set(str(step.action_config.get('dest_x', 0)))
-                dialog.dest_y_var.set(str(step.action_config.get('dest_y', 0)))
+            elif step.action_type == "drag":
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.dest_x_var.set(str(step.action_config.get('dest_x', 0)))
+                    dialog.dest_y_var.set(str(step.action_config.get('dest_y', 0)))
 
-        elif step.action_type == "key":
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
-            if hasattr(step, 'action_config') and step.action_config:
-                dialog.key_var.set(step.action_config.get('key', 'enter'))
+            elif step.action_type == "key":
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.key_var.set(step.action_config.get('key', 'enter'))
 
-        elif step.action_type == "hotkey":
-            dialog.type_var.set(step.element_type)
-            dialog.text_var.set(step.text)
-            dialog.match_var.set(step.text_match)
-            if hasattr(step, 'action_config') and step.action_config:
-                keys = step.action_config.get('keys', [])
-                dialog.hotkey_var.set(', '.join(keys))
+            elif step.action_type == "hotkey":
+                dialog.type_var.set(step.element_type)
+                dialog.text_var.set(step.text)
+                dialog.match_var.set(step.text_match)
+                if hasattr(step, 'action_config') and step.action_config:
+                    keys = step.action_config.get('keys', [])
+                    dialog.hotkey_var.set(', '.join(keys))
 
-        elif step.action_type == "scroll":
-            if hasattr(step, 'action_config') and step.action_config:
-                dialog.scroll_dir_var.set(step.action_config.get('direction', 'down'))
-                dialog.scroll_clicks_var.set(str(step.action_config.get('clicks', 3)))
+            elif step.action_type == "scroll":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.scroll_dir_var.set(step.action_config.get('direction', 'down'))
+                    dialog.scroll_clicks_var.set(str(step.action_config.get('clicks', 3)))
 
-        elif step.action_type == "wait":
-            if hasattr(step, 'action_config') and step.action_config:
-                dialog.duration_var.set(str(step.action_config.get('duration', 2)))
+            elif step.action_type == "wait":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.duration_var.set(str(step.action_config.get('duration', 2)))
+
+        else:
+            # Canvas element selected — restore only action-specific non-element fields
+            if step.action_type == "find_and_click":
+                if hasattr(step, 'button'):
+                    dialog.button_var.set(step.button)
+                if hasattr(step, 'move_duration'):
+                    dialog.move_duration_var.set(str(step.move_duration))
+
+            elif step.action_type == "text":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.type_text_var.set(step.action_config.get('text', ''))
+                    dialog.clear_first_var.set(step.action_config.get('clear_first', False))
+
+            elif step.action_type == "drag":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.dest_x_var.set(str(step.action_config.get('dest_x', 0)))
+                    dialog.dest_y_var.set(str(step.action_config.get('dest_y', 0)))
+
+            elif step.action_type == "key":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.key_var.set(step.action_config.get('key', 'enter'))
+
+            elif step.action_type == "hotkey":
+                if hasattr(step, 'action_config') and step.action_config:
+                    keys = step.action_config.get('keys', [])
+                    dialog.hotkey_var.set(', '.join(keys))
+
+            elif step.action_type == "scroll":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.scroll_dir_var.set(step.action_config.get('direction', 'down'))
+                    dialog.scroll_clicks_var.set(str(step.action_config.get('clicks', 3)))
+
+            elif step.action_type == "wait":
+                if hasattr(step, 'action_config') and step.action_config:
+                    dialog.duration_var.set(str(step.action_config.get('duration', 2)))
 
         # Pre-fill sideload fields if step has sideload config (separate from action)
         if hasattr(step, 'sideload_config') and step.sideload_config:
@@ -1665,12 +1871,11 @@ class WorkflowBuilderGUI:
 
     def remove_step(self):
         """Remove selected step."""
-        selection = self.steps_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a step to remove!")
+        idx = self._get_selected_step_index()
+        if idx is None:
+            self.log_result("Please select a step to remove!", "warn")
             return
 
-        idx = selection[0]
         self.workflow_steps.pop(idx)
 
         # Renumber steps
@@ -1682,11 +1887,10 @@ class WorkflowBuilderGUI:
 
     def move_step_up(self):
         """Move step up in list."""
-        selection = self.steps_listbox.curselection()
-        if not selection or selection[0] == 0:
+        idx = self._get_selected_step_index()
+        if idx is None or idx == 0:
             return
 
-        idx = selection[0]
         self.workflow_steps[idx], self.workflow_steps[idx-1] = \
             self.workflow_steps[idx-1], self.workflow_steps[idx]
 
@@ -1695,15 +1899,14 @@ class WorkflowBuilderGUI:
             step.step_number = i + 1
 
         self.refresh_steps_list()
-        self.steps_listbox.selection_set(idx - 1)
+        self._select_step(idx - 1)
 
     def move_step_down(self):
         """Move step down in list."""
-        selection = self.steps_listbox.curselection()
-        if not selection or selection[0] == len(self.workflow_steps) - 1:
+        idx = self._get_selected_step_index()
+        if idx is None or idx == len(self.workflow_steps) - 1:
             return
 
-        idx = selection[0]
         self.workflow_steps[idx], self.workflow_steps[idx+1] = \
             self.workflow_steps[idx+1], self.workflow_steps[idx]
 
@@ -1712,16 +1915,15 @@ class WorkflowBuilderGUI:
             step.step_number = i + 1
 
         self.refresh_steps_list()
-        self.steps_listbox.selection_set(idx + 1)
+        self._select_step(idx + 1)
 
     def copy_step(self):
         """Copy selected step to clipboard."""
-        selection = self.steps_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a step to copy!")
+        idx = self._get_selected_step_index()
+        if idx is None:
+            self.log_result("Please select a step to copy!", "warn")
             return
 
-        idx = selection[0]
         step = self.workflow_steps[idx]
 
         # Deep copy the step
@@ -1732,7 +1934,7 @@ class WorkflowBuilderGUI:
     def paste_step(self):
         """Paste copied step."""
         if not self.copied_step:
-            messagebox.showwarning("Warning", "No step copied! Please copy a step first.")
+            self.log_result("No step copied! Please copy a step first.", "warn")
             return
 
         import copy
@@ -1740,9 +1942,9 @@ class WorkflowBuilderGUI:
         new_step = copy.deepcopy(self.copied_step)
 
         # Get the position to insert (after current selection, or at end)
-        selection = self.steps_listbox.curselection()
-        if selection:
-            insert_idx = selection[0] + 1
+        cur_idx = self._get_selected_step_index()
+        if cur_idx is not None:
+            insert_idx = cur_idx + 1
         else:
             insert_idx = len(self.workflow_steps)
 
@@ -1754,30 +1956,80 @@ class WorkflowBuilderGUI:
             step.step_number = i + 1
 
         self.refresh_steps_list()
-        self.steps_listbox.selection_set(insert_idx)
+        self._select_step(insert_idx)
         self.status_text.set(f"Pasted step: {new_step.description}")
 
+    def _get_selected_step_index(self):
+        """Return the workflow_steps index of the currently selected step row, or None."""
+        sel = self.steps_listbox.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        if "_v_" in iid:
+            return None  # verify element row – not a step
+        if iid.startswith("step_"):
+            try:
+                return int(iid.split("_")[1])
+            except (IndexError, ValueError):
+                return None
+        return None
+
+    def _select_step(self, idx):
+        """Select a step row in the treeview by step index."""
+        iid = f"step_{idx}"
+        if self.steps_listbox.exists(iid):
+            self.steps_listbox.selection_set(iid)
+            self.steps_listbox.see(iid)
+            self.steps_listbox.focus(iid)
+
     def refresh_steps_list(self):
-        """Refresh steps listbox."""
-        self.steps_listbox.delete(0, tk.END)
-        for step in self.workflow_steps:
+        """Refresh steps treeview, preserving expanded state."""
+        # Remember which step nodes were open
+        expanded = {iid for iid in self.steps_listbox.get_children()
+                    if self.steps_listbox.item(iid, "open")}
+        self.steps_listbox.delete(*self.steps_listbox.get_children())
+        for i, step in enumerate(self.workflow_steps):
+            iid = f"step_{i}"
             optional_tag = " [Optional]" if getattr(step, 'optional', False) else ""
-            display_text = f"{step.step_number}. {step.description or '[No description]'}{optional_tag}"
-            self.steps_listbox.insert(tk.END, display_text)
+            verify_elements = getattr(step, 'verify_elements', [])
+            verify_tag = f"  [{len(verify_elements)} verify]" if verify_elements else ""
+            display_text = f"{step.step_number}. {step.description or '[No description]'}{optional_tag}{verify_tag}"
+            self.steps_listbox.insert("", "end", iid=iid, text=display_text,
+                                       open=(iid in expanded))
+            for j, elem in enumerate(verify_elements):
+                v_iid = f"step_{i}_v_{j}"
+                v_text = (f"  {elem.get('type', 'contains')}: "
+                          f"'{elem.get('text', '')}' "
+                          f"({elem.get('text_match', 'contains')})")
+                self.steps_listbox.insert(iid, "end", iid=v_iid, text=v_text,
+                                           tags=("verify",))
+
+    def log_result(self, message, level="info"):
+        """Append a message to the Test Output panel."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.output_text.insert(tk.END, f"[{ts}] ", "time")
+        self.output_text.insert(tk.END, f"{message}\n", level)
+        self.output_text.see(tk.END)
+        self.root.update()
+
+    def clear_test_output(self):
+        """Clear the Test Output panel."""
+        self.output_text.delete("1.0", tk.END)
 
     def test_action(self):
         """Test selected action on SUT."""
-        selection = self.steps_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a step to test!")
+        idx = self._get_selected_step_index()
+        if idx is None:
+            self.log_result("Please select a step to test!", "warn")
             return
 
         if not self.network:
-            messagebox.showwarning("Warning", "Please connect to SUT first!")
+            self.log_result("Please connect to SUT first!", "warn")
             return
 
-        idx = selection[0]
         step = self.workflow_steps[idx]
+        self.log_result(f"── Step {step.step_number}: {step.description} "
+                        + "─" * max(0, 40 - len(step.description)), "header")
 
         try:
             # Handle find_and_click actions
@@ -1790,7 +2042,7 @@ class WorkflowBuilderGUI:
                 else:
                     # Find element using vision model (for loaded YAML)
                     if not self.vision_model or not self.current_screenshot:
-                        messagebox.showwarning("Warning", "Please capture and parse a screenshot first to test this action!")
+                        self.log_result("Please capture and parse a screenshot first to test this action!", "warn")
                         return
 
                     # Find the element
@@ -1813,7 +2065,7 @@ class WorkflowBuilderGUI:
                                 break
 
                     if not found_bbox:
-                        messagebox.showerror("Error", f"Could not find element with text '{step.text}'")
+                        self.log_result(f"Element not found: '{step.text}'", "fail")
                         return
 
                     x = found_bbox.x + found_bbox.width // 2
@@ -1828,19 +2080,145 @@ class WorkflowBuilderGUI:
 
                 self.network.send_action(action)
                 self.status_text.set(f"Tested step {step.step_number}: Click at ({x}, {y})")
-                messagebox.showinfo("Success", f"Action executed on SUT at ({x}, {y})!")
+                self.log_result(f"Click sent → ({x}, {y})", "pass")
+
+            # Handle coordinate-based click variants (right_click, double_click, middle_click)
+            elif step.action_type in ["double_click", "right_click", "middle_click"]:
+                if step.selected_bbox:
+                    bbox = step.selected_bbox
+                    x = bbox.x + bbox.width // 2
+                    y = bbox.y + bbox.height // 2
+                else:
+                    if not self.vision_model or not self.current_screenshot:
+                        self.log_result("Please capture and parse a screenshot first to test this action!", "warn")
+                        return
+
+                    bboxes = self.vision_model.detect_ui_elements(self.current_screenshot)
+
+                    found_bbox = None
+                    for bbox in bboxes:
+                        if step.element_type in ["any", bbox.element_type]:
+                            if hasattr(step, 'text_match') and step.text_match == "contains":
+                                if step.text.lower() in bbox.element_text.lower():
+                                    found_bbox = bbox
+                                    break
+                            elif hasattr(step, 'text_match') and step.text_match == "exact":
+                                if step.text.lower() == bbox.element_text.lower():
+                                    found_bbox = bbox
+                                    break
+                            elif step.text.lower() in bbox.element_text.lower():
+                                found_bbox = bbox
+                                break
+
+                    if not found_bbox:
+                        self.log_result(f"Element not found: '{step.text}'", "fail")
+                        return
+
+                    x = found_bbox.x + found_bbox.width // 2
+                    y = found_bbox.y + found_bbox.height // 2
+
+                # Map to correct SUT action type
+                if step.action_type == "double_click":
+                    action = {"type": "double_click", "x": x, "y": y, "button": "left"}
+                elif step.action_type == "right_click":
+                    action = {"type": "click", "x": x, "y": y, "button": "right"}
+                else:  # middle_click
+                    action = {"type": "click", "x": x, "y": y, "button": "middle"}
+
+                self.network.send_action(action)
+                self.status_text.set(f"Tested step {step.step_number}: {step.action_type} at ({x}, {y})")
+                self.log_result(f"{step.action_type} sent → ({x}, {y})", "pass")
 
             # Handle other actions with action_config
             elif step.action_config:
                 self.network.send_action(step.action_config)
                 self.status_text.set(f"Tested step {step.step_number}")
-                messagebox.showinfo("Success", "Action executed on SUT!")
+                self.log_result(f"Action '{step.action_config.get('type', 'unknown')}' sent to SUT", "pass")
 
             else:
-                messagebox.showwarning("Warning", "This step has no executable action configured!")
+                self.log_result("This step has no executable action configured!", "warn")
+                return
+
+            # --- Run verify elements after action (same logic as flow) ---
+            verify_elements = getattr(step, 'verify_elements', [])
+            if verify_elements:
+                if not self.vision_model or not self.screenshot_mgr:
+                    self.log_result("Verify skipped — missing connection:", "warn")
+                    if not self.vision_model:
+                        self.log_result("  • Vision model not connected", "warn")
+                    if not self.screenshot_mgr:
+                        self.log_result("  • SUT screenshot not available", "warn")
+                    return
+
+                delay = step.expected_delay
+                if delay > 0:
+                    self.status_text.set(f"Step {step.step_number}: Waiting {delay}s before verify...")
+                    self.root.update()
+                    import time
+                    for t in range(int(delay * 10)):
+                        time.sleep(0.1)
+                        remaining = delay - (t / 10)
+                        if t % 10 == 0:
+                            self.status_text.set(f"Step {step.step_number}: Waiting {remaining:.0f}s before verify...")
+                            self.root.update()
+
+                self.status_text.set(f"Step {step.step_number}: Capturing screenshot for verification...")
+                self.root.update()
+                import os
+                os.makedirs("workflow_builder_temp", exist_ok=True)
+                v_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                verify_shot = f"workflow_builder_temp/test_verify_{step.step_number}_{v_ts}.png"
+                self.screenshot_mgr.capture(verify_shot)
+
+                self.status_text.set(f"Step {step.step_number}: Parsing UI for verification...")
+                self.root.update()
+                v_bboxes = self.vision_model.detect_ui_elements(verify_shot)
+
+                verify_passed = True
+                verify_results = []
+                for vi, elem in enumerate(verify_elements):
+                    elem_type  = elem.get('type', 'any')
+                    elem_text  = elem.get('text', '')
+                    elem_match = elem.get('text_match', 'contains')
+                    self.status_text.set(
+                        f"Step {step.step_number}: Verifying [{vi + 1}/{len(verify_elements)}] '{elem_text}'...")
+                    self.root.update()
+
+                    found = False
+                    for bbox in v_bboxes:
+                        type_ok = elem_type in ["any", bbox.element_type]
+                        if not type_ok:
+                            continue
+                        tl = bbox.element_text.lower()
+                        sl = elem_text.lower()
+                        if elem_match == "contains" and sl in tl:
+                            found = True; break
+                        elif elem_match == "exact" and sl == tl:
+                            found = True; break
+                        elif elem_match == "startswith" and tl.startswith(sl):
+                            found = True; break
+
+                    label = "PASS" if found else "FAIL"
+                    verify_results.append(f"  [{label}] '{elem_text}' ({elem_match})")
+                    if not found:
+                        verify_passed = False
+
+                result_summary = "\n".join(verify_results)
+                if verify_passed:
+                    self.status_text.set(f"Step {step.step_number}: All {len(verify_elements)} verification(s) passed")
+                    self.log_result(f"All {len(verify_elements)} verification(s) passed:", "pass")
+                    for line in verify_results:
+                        self.log_result(line, "pass")
+                else:
+                    self.status_text.set(f"Step {step.step_number}: Verification FAILED")
+                    self.log_result("Verification FAILED:", "fail")
+                    for line in verify_results:
+                        self.log_result(line, "pass" if "PASS" in line else "fail")
+            else:
+                self.log_result("Action executed on SUT!", "pass")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to test action: {str(e)}")
+            self.log_result(f"Error: {e}", "fail")
 
     def toggle_flow(self):
         """Toggle between starting and stopping flow."""
@@ -1854,21 +2232,16 @@ class WorkflowBuilderGUI:
 
     def test_full_flow(self):
         """Test full flow from selected step onwards."""
-        selection = self.steps_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a starting step!")
+        start_idx = self._get_selected_step_index()
+        if start_idx is None:
+            self.log_result("Please select a starting step!", "warn")
             return
 
         if not self.network:
-            messagebox.showwarning("Warning", "Please connect to SUT first!")
+            self.log_result("Please connect to SUT first!", "warn")
             return
-
-        start_idx = selection[0]
         total_steps = len(self.workflow_steps) - start_idx
-        
-        if not messagebox.askyesno("Test Full Flow", 
-            f"Execute {total_steps} steps starting from step {start_idx + 1}?"):
-            return
+        self.log_result(f"Starting flow: {total_steps} step(s) from step {start_idx + 1}", "header")
 
         # Set running state and update button
         self.flow_running = True
@@ -1887,9 +2260,10 @@ class WorkflowBuilderGUI:
                 break
             
             step = self.workflow_steps[i]
-            self.steps_listbox.selection_clear(0, tk.END)
-            self.steps_listbox.selection_set(i)
-            self.steps_listbox.see(i)
+            sel = self.steps_listbox.selection()
+            if sel:
+                self.steps_listbox.selection_remove(*sel)
+            self._select_step(i)
             self.root.update()
             
             self.status_text.set(f"Executing step {i + 1}/{len(self.workflow_steps)}: {step.description}")
@@ -1974,7 +2348,66 @@ class WorkflowBuilderGUI:
                     
                     action = {"type": "click", "x": x, "y": y, "button": getattr(step, 'button', 'left')}
                     self.network.send_action(action)
-                
+
+                elif step.action_type in ["double_click", "right_click", "middle_click"]:
+                    # Resolve coordinates using same capture+parse pattern as find_and_click
+                    x, y = None, None
+                    if self.screenshot_mgr and self.vision_model and getattr(step, 'text', ''):
+                        self.status_text.set(f"Step {i + 1}: Capturing screenshot for {step.action_type}...")
+                        self.root.update()
+                        import os
+                        os.makedirs("workflow_builder_temp", exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        screenshot_path = f"workflow_builder_temp/flow_step_{i+1}_{timestamp}.png"
+                        self.screenshot_mgr.capture(screenshot_path)
+                        if not self.flow_stop_requested:
+                            self.status_text.set(f"Step {i + 1}: Parsing UI elements...")
+                            self.root.update()
+                            bboxes = self.vision_model.detect_ui_elements(screenshot_path)
+                            if not self.flow_stop_requested:
+                                search_text = getattr(step, 'text', '')
+                                search_type = getattr(step, 'element_type', 'any')
+                                match_mode = getattr(step, 'text_match', 'contains')
+                                found_bbox = None
+                                for bbox in bboxes:
+                                    type_match = search_type in ["any", bbox.element_type]
+                                    if type_match and search_text:
+                                        if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
+                                            found_bbox = bbox
+                                            break
+                                        elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
+                                            found_bbox = bbox
+                                            break
+                                        elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
+                                            found_bbox = bbox
+                                            break
+                                if found_bbox:
+                                    x = found_bbox.x + found_bbox.width // 2
+                                    y = found_bbox.y + found_bbox.height // 2
+                                    self.status_text.set(f"Step {i + 1}: Found '{search_text}' at ({x}, {y})")
+                                    self.root.update()
+                    if self.flow_stop_requested:
+                        stopped = True
+                        break
+                    # Fallback to stored bbox if vision model search found nothing
+                    if x is None and step.selected_bbox:
+                        bbox = step.selected_bbox
+                        x = bbox.x + bbox.width // 2
+                        y = bbox.y + bbox.height // 2
+                        self.status_text.set(f"Step {i + 1}: Using stored coords ({x}, {y})")
+                        self.root.update()
+                    if x is None:
+                        failed_step = (i + 1, f"No coordinates available for {step.action_type}")
+                        break
+                    # Map to correct SUT action type
+                    if step.action_type == "double_click":
+                        action = {"type": "double_click", "x": x, "y": y, "button": "left"}
+                    elif step.action_type == "right_click":
+                        action = {"type": "click", "x": x, "y": y, "button": "right"}
+                    else:  # middle_click
+                        action = {"type": "click", "x": x, "y": y, "button": "middle"}
+                    self.network.send_action(action)
+
                 elif step.action_config:
                     # Handle wait actions locally to avoid network timeout
                     if step.action_config.get('type') == 'wait':
@@ -2006,16 +2439,104 @@ class WorkflowBuilderGUI:
                 # Wait for expected delay (in small chunks to check stop)
                 delay = getattr(step, 'expected_delay', 1)
                 import time
-                for _ in range(int(delay * 10)):
+                total_tenths = int(delay * 10)
+                for t in range(total_tenths):
                     if self.flow_stop_requested:
                         stopped = True
                         break
+                    remaining = delay - (t / 10)
+                    if t % 10 == 0:
+                        self.status_text.set(
+                            f"Step {i + 1}: Waiting {remaining:.0f}s before verify...")
+                        self.root.update()
                     time.sleep(0.1)
                     self.root.update()
-                
+
                 if stopped:
                     break
-                
+
+                # --- Verify elements after delay ---
+                verify_elements = getattr(step, 'verify_elements', [])
+                if verify_elements and self.vision_model and self.screenshot_mgr:
+                    self.status_text.set(
+                        f"Step {i + 1}: Capturing screenshot for verification...")
+                    self.root.update()
+
+                    import os
+                    os.makedirs("workflow_builder_temp", exist_ok=True)
+                    v_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    verify_shot = (f"workflow_builder_temp/"
+                                   f"verify_step_{i + 1}_{v_ts}.png")
+                    self.screenshot_mgr.capture(verify_shot)
+
+                    self.status_text.set(
+                        f"Step {i + 1}: Parsing UI for verification...")
+                    self.root.update()
+                    v_bboxes = self.vision_model.detect_ui_elements(verify_shot)
+
+                    verify_passed = True
+                    verify_results = []
+                    for vi, elem in enumerate(verify_elements):
+                        if self.flow_stop_requested:
+                            stopped = True
+                            break
+                        elem_type  = elem.get('type', 'any')
+                        elem_text  = elem.get('text', '')
+                        elem_match = elem.get('text_match', 'contains')
+                        self.status_text.set(
+                            f"Step {i + 1}: Verifying "
+                            f"[{vi + 1}/{len(verify_elements)}] '{elem_text}'...")
+                        self.root.update()
+
+                        found = False
+                        for bbox in v_bboxes:
+                            type_ok = elem_type in ["any", bbox.element_type]
+                            if not type_ok:
+                                continue
+                            tl = bbox.element_text.lower()
+                            sl = elem_text.lower()
+                            if elem_match == "contains" and sl in tl:
+                                found = True
+                                break
+                            elif elem_match == "exact" and sl == tl:
+                                found = True
+                                break
+                            elif elem_match == "startswith" and tl.startswith(sl):
+                                found = True
+                                break
+
+                        label = "PASS" if found else "FAIL ✗"
+                        verify_results.append(
+                            f"  [{label}] '{elem_text}' ({elem_match})")
+                        if not found:
+                            verify_passed = False
+
+                    if stopped:
+                        break
+
+                    result_summary = "\n".join(verify_results)
+                    if verify_passed:
+                        self.status_text.set(
+                            f"Step {i + 1}: All {len(verify_elements)} "
+                            f"verification(s) passed")
+                        self.log_result(f"── Step {i + 1}: {step.description} ──", "header")
+                        self.log_result(f"All {len(verify_elements)} verification(s) passed:", "pass")
+                        for line in verify_results:
+                            self.log_result(line, "pass")
+                        self.root.update()
+                    else:
+                        self.log_result(f"── Step {i + 1}: {step.description} ──", "header")
+                        self.log_result("Verification FAILED:", "fail")
+                        for line in verify_results:
+                            self.log_result(line, "pass" if "PASS" in line else "fail")
+                        failed_step = (
+                            i + 1,
+                            f"Verification failed:\n{result_summary}")
+                        break
+
+                if stopped:
+                    break
+
             except Exception as e:
                 failed_step = (i + 1, str(e))
                 break
@@ -2023,17 +2544,17 @@ class WorkflowBuilderGUI:
         # Reset button state
         self.flow_running = False
         self.flow_stop_requested = False
-        self.flow_btn.config(text="▶▶ Flow", bg="#2E7D32")  # Green
+        self.flow_btn.config(text="Flow", bg="#2E7D32")  # Green
         self.root.update()
         
         if stopped:
             self.status_text.set(f"Flow stopped after {executed} steps")
-            messagebox.showinfo("Stopped", f"Flow stopped after {executed} steps")
+            self.log_result(f"Flow stopped after {executed} step(s).", "warn")
         elif failed_step:
-            messagebox.showerror("Flow Failed", f"Step {failed_step[0]} failed: {failed_step[1]}")
+            self.log_result(f"Flow FAILED at step {failed_step[0]}: {failed_step[1]}", "fail")
             self.status_text.set(f"Flow failed at step {failed_step[0]}")
         else:
-            messagebox.showinfo("Success", f"Executed {total_steps} steps successfully!")
+            self.log_result(f"Flow complete — {total_steps} step(s) executed successfully.", "pass")
             self.status_text.set(f"Flow complete: {total_steps} steps executed")
 
     def open_screenshots_folder(self):
@@ -2049,12 +2570,12 @@ class WorkflowBuilderGUI:
             subprocess.Popen(f'explorer "{screenshots_dir}\\workflow_builder_temp"')
             self.status_text.set(f"Opened folder: {screenshots_dir}\\workflow_builder_temp")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to open folder: {str(e)}")
+            self.log_result(f"✗ Failed to open folder: {e}", "fail")
 
     def save_yaml(self):
         """Save workflow to YAML file."""
         if not self.workflow_steps:
-            messagebox.showwarning("Warning", "No steps to save!")
+            self.log_result("No steps to save!", "warn")
             return
 
         filename = filedialog.asksaveasfilename(
@@ -2134,10 +2655,10 @@ class WorkflowBuilderGUI:
                 yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
 
             self.status_text.set(f"Saved workflow to {filename}")
-            messagebox.showinfo("Success", f"Workflow saved to:\n{filename}")
+            self.log_result(f"Workflow saved → {filename}", "pass")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save YAML: {str(e)}")
+            self.log_result(f"Save failed: {e}", "fail")
 
     def load_yaml(self):
         """Load workflow from YAML file."""
@@ -2227,14 +2748,17 @@ class WorkflowBuilderGUI:
                 if "sideload" in step_data:
                     step.sideload_config = step_data["sideload"]
 
+                # Load verify elements
+                step.verify_elements = step_data.get("verify_success", [])
+
                 self.workflow_steps.append(step)
 
             self.refresh_steps_list()
             self.status_text.set(f"Loaded {len(self.workflow_steps)} steps from {filename}")
-            messagebox.showinfo("Success", f"Loaded workflow from:\n{filename}")
+            self.log_result(f"Loaded {len(self.workflow_steps)} step(s) from {filename}", "pass")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load YAML: {str(e)}")
+            self.log_result(f"✗ Load failed: {e}", "fail")
 
     def show_hooks_editor(self):
         """Show hooks editor dialog."""

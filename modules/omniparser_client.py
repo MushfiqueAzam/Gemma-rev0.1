@@ -19,6 +19,85 @@ from modules.gemma_client import BoundingBox  # Reuse the BoundingBox class
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Icon label normaliser
+# Maps fragment keywords found in OmniParser's verbose AI captions
+# (e.g. "a white triangle pointing to the right") → clean action names.
+# ──────────────────────────────────────────────────────────────────────────────
+_ICON_LABEL_MAP = [
+    # ── Media / playback controls ──────────────────────────────────────────────
+    (["triangle pointing right", "play button", "▶"],                        "play"),
+    (["two vertical bar", "pause button", "‖", "||"],                        "pause"),
+    (["square button", "stop button"],                                        "stop"),
+    (["fast forward", "next track", ">>", "skip forward"],                   "next"),
+    (["previous track", "rewind", "back track", "skip back", "<<"],          "previous"),
+    (["record button", "red circle recording"],                               "record"),
+    (["loop icon", "repeat icon", "shuffle icon"],                            "loop"),
+    # ── Window management ─────────────────────────────────────────────────────
+    (["x mark", "x button", "close button", "✕", "✖"],                      "close"),
+    (["minus sign", "minimize button", "underscore button"],                  "minimize"),
+    (["maximize button", "full screen button", "square outline button"],      "maximize"),
+    (["restore button", "overlapping square", "two squares"],                 "restore"),
+    (["expand button", "arrows outward", "four corner arrow", "enlarge icon"],"expand"),
+    (["collapse button", "arrows inward", "shrink icon"],                     "collapse"),
+    # ── Common toolbar actions ─────────────────────────────────────────────────
+    (["gear icon", "cog icon", "settings icon", "wrench icon"],               "settings"),
+    (["refresh icon", "curved arrow", "circular arrow", "reload icon", "↺", "↻"], "refresh"),
+    (["magnifying glass", "search icon", "loupe icon", "magnif"],             "search"),
+    (["plus sign", "add button", "create new"],                               "add"),
+    (["pencil icon", "pen icon", "edit icon"],                                "edit"),
+    (["trash icon", "delete icon", "recycle bin", "garbage icon"],            "delete"),
+    (["floppy disk", "save icon"],                                            "save"),
+    (["download icon", "arrow pointing down", "↓"],                          "download"),
+    (["upload icon", "arrow pointing up", "↑"],                              "upload"),
+    (["share icon", "export icon"],                                           "share"),
+    (["home icon", "house icon"],                                             "home"),
+    (["back arrow", "left arrow", "←", "go back"],                           "back"),
+    (["forward arrow", "right arrow", "→", "go forward"],                    "forward"),
+    (["information icon", "info icon", "ℹ"],                                  "info"),
+    (["warning icon", "alert icon", "exclamation mark", "⚠"],                "warning"),
+    (["check mark", "tick mark", "✓", "✔", "checkmark"],                     "confirm"),
+    (["five-pointed star", "star icon", "favorite icon", "bookmark icon"],    "bookmark"),
+    (["hamburger menu", "three horizontal line", "menu icon", "≡"],          "menu"),
+    (["bell icon", "notification icon", "🔔"],                                "notifications"),
+    (["user icon", "person icon", "profile icon", "avatar icon"],             "profile"),
+    (["folder icon"],                                                         "folder"),
+    (["file icon", "document icon", "page icon"],                             "file"),
+    (["chain icon", "hyperlink icon", "link icon"],                           "link"),
+    (["copy icon", "clipboard icon", "duplicate icon"],                       "copy"),
+    (["scissors icon", "cut icon"],                                           "cut"),
+    (["paste icon"],                                                          "paste"),
+    (["undo icon", "anti-clockwise arrow", "counterclockwise arrow"],         "undo"),
+    (["redo icon", "clockwise arrow"],                                        "redo"),
+    (["zoom in", "plus magnifying"],                                          "zoom_in"),
+    (["zoom out", "minus magnifying"],                                        "zoom_out"),
+    (["speaker off", "volume off", "mute icon", "🔇"],                        "mute"),
+    (["speaker icon", "volume icon", "🔊"],                                   "volume"),
+    (["camera icon", "photo icon", "📷"],                                     "camera"),
+    (["video icon", "film icon", "🎥"],                                       "video"),
+    (["padlock closed", "lock icon", "🔒"],                                   "lock"),
+    (["padlock open", "unlock icon", "🔓"],                                   "unlock"),
+    (["power button", "on/off button", "⏻"],                                  "power"),
+    (["question mark icon", "help icon"],                                     "help"),
+    (["four arrow", "move icon", "drag icon"],                                "move"),
+    (["diagonal arrow", "resize icon"],                                       "resize"),
+    (["funnel icon", "filter icon"],                                          "filter"),
+    (["sort icon", "arrow up down"],                                          "sort"),
+    (["printer icon", "print icon", "🖨"],                                    "print"),
+    (["paperclip icon", "attach icon", "📎"],                                 "attach"),
+    (["calendar icon", "date icon", "📅"],                                    "calendar"),
+    (["clock icon", "time icon", "⏰"],                                       "time"),
+    (["map pin", "location icon", "📍"],                                      "location"),
+    (["phone icon", "call icon", "📞"],                                       "call"),
+    (["envelope icon", "email icon", "📧"],                                   "email"),
+    (["speech bubble", "message icon", "chat icon", "💬"],                   "message"),
+    (["lightning bolt", "flash icon", "⚡"],                                  "action"),
+    (["magic wand", "sparkle icon", "✨"],                                    "auto"),
+]
+
+# Element type strings that OmniParser uses for non-text visual elements
+_ICON_ELEMENT_TYPES = {"icon", "box", "image", "graphic", "button", "visual"}
+
 class OmniparserClient:
     """Client for the Omniparser API server with streamlined annotation handling."""
     
@@ -41,6 +120,39 @@ class OmniparserClient:
             logger.error(f"Failed to connect to Omniparser API: {str(e)}")
             logger.error(f"Please ensure Omniparser server is running at {api_url}")
     
+    @staticmethod
+    def _normalize_icon_label(raw_content: str) -> str:
+        """
+        Map a verbose OmniParser icon caption to a clean semantic label.
+
+        OmniParser describes icons with sentences like
+        "a white triangle pointing to the right on a dark background".
+        This method converts those to short, workflow-friendly names like "play".
+
+        Returns the original content unchanged if no mapping is found (may still
+        be meaningful text).  Returns "icon" as a last-resort fallback.
+        """
+        if not raw_content:
+            return ""
+        lower = raw_content.lower()
+        for keywords, label in _ICON_LABEL_MAP:
+            for kw in keywords:
+                if not kw:
+                    continue
+                # Single short words (≤8 chars, no spaces): require word boundaries so
+                # "star" won't match "restart", "lock" won't match "clock", etc.
+                # Multi-word phrases are matched as substrings (already specific enough).
+                if ' ' not in kw and len(kw) <= 8:
+                    if re.search(r'\b' + re.escape(kw) + r'\b', lower):
+                        return label
+                else:
+                    if kw in lower:
+                        return label
+        # No mapping found – return the raw content trimmed to 40 chars so it
+        # still shows a human-readable label in the workflow builder.
+        cleaned = raw_content.strip()
+        return cleaned[:40] if cleaned else ""
+
     def _test_connection(self):
         """Test connection to the API."""
         response = self.session.get(f"{self.api_url}/probe")
@@ -113,18 +225,31 @@ class OmniparserClient:
                     is_interactive = element.get('interactivity', False)
                     element_type = element.get('type', 'unknown')
                     element_content = element.get('content', '').strip()
-                    
+
+                    # ── Icon normalisation ────────────────────────────────────
+                    # OmniParser marks icon-like elements with various type
+                    # strings ("icon", "box", "image", "graphic", "button").
+                    # For all of these:
+                    #   1. Normalise type to "icon" for consistency.
+                    #   2. Map verbose AI captions to clean action labels.
+                    #   3. Treat as interactive (they are clickable UI widgets).
+                    is_icon_type = element_type.lower() in _ICON_ELEMENT_TYPES
+                    if is_icon_type:
+                        element_type = "icon"
+                        element_content = self._normalize_icon_label(element_content)
+                        is_interactive = True   # icons are always interactive
+
                     # COMPREHENSIVE INCLUSION LOGIC - Capture everything useful
                     should_include = False
                     inclusion_reason = ""
-                    
+
                     if is_interactive:
                         # Include ALL interactive elements (UI buttons, icons, etc.)
                         should_include = True
                         inclusion_reason = "interactive"
                         interactive_count += 1
                     elif element_content:
-                        # Include ALL elements with text content - critical for performance data
+                        # Include ALL elements with text content
                         should_include = True
                         inclusion_reason = "has_content"
                         text_count += 1
@@ -136,16 +261,17 @@ class OmniparserClient:
                         ]):
                             performance_data_count += 1
                             inclusion_reason = "performance_data"
-                    elif element_type in ['icon', 'image', 'graphic', 'button']:
-                        # Include visual elements that might be important for state detection
+                    else:
+                        # Include ALL remaining bbox elements – never silently drop
+                        # anything OmniParser detected, regardless of size.
                         should_include = True
-                        inclusion_reason = "visual_element"
-                    elif (abs_x2 - abs_x1) > 30 and (abs_y2 - abs_y1) > 15:
-                        # Include reasonably-sized elements (might be containers, progress bars, etc.)
-                        should_include = True
-                        inclusion_reason = "significant_size"
-                    
+                        inclusion_reason = "bbox_present"
+
                     if should_include:
+                        # Assign a positional fallback label for unlabelled icons
+                        if element_type == "icon" and not element_content:
+                            element_content = f"icon_{len(bounding_boxes) + 1}"
+
                         # Create BoundingBox object
                         bbox = BoundingBox(
                             x=abs_x1,
@@ -236,15 +362,17 @@ class OmniparserClient:
             base64_image = self._encode_image(image_path)
             
             # Prepare the payload for Omniparser with optimal thresholds
+            # box_threshold: minimum value → catches small icon buttons
+            # iou_threshold: suppress heavily overlapping duplicate boxes
             payload = {
                 "base64_image": base64_image,
-                "box_threshold": 0.05,
+                "box_threshold": 0.01,
                 "iou_threshold": 0.1,
                 "use_paddleocr": True
             }
 
             # Send the request to Omniparser API
-            logger.info(f"Sending request to {self.api_url}/parse/ with box_threshold=0.05, iou_threshold=0.1, use_paddleocr=True")
+            logger.info(f"Sending request to {self.api_url}/parse/ with box_threshold=0.01, iou_threshold=0.1, use_paddleocr=True")
             response = self.session.post(
                 f"{self.api_url}/parse/",
                 json=payload,
