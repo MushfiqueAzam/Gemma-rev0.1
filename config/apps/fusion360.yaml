@@ -1,0 +1,52 @@
+# Fusion 360 Automation Configuration
+# Workflow: Launch Fusion 360 → Cancel "What do you want to design" popup
+
+metadata:
+  game_name: "Autodesk Fusion 360"
+  path: "C:\\Users\\Local_Admin\\AppData\\Local\\Autodesk\\webdeploy\\production\\6a0c9611291d45bb9226980209917c3d\\FusionLauncher.exe"
+  process_id: "Fusion360.exe"
+  version: "1.0"
+  startup_wait: 40        # Fusion 360 is slow to start, give it time
+  benchmark_duration: 0
+  resolution: "1920x1080"
+  preset: ""
+
+enhanced_features:
+  screenshot_on_failure: true
+  detailed_logging: true
+  monitor_process_cpu: false
+
+steps:
+  # === STEP 1: Wait for Fusion 360 to fully load ===
+  1:
+    description: "Wait for Fusion 360 to load and show the 'What do you want to design' popup"
+    find:
+      type: "text"
+      text: "What do you want to design"
+      text_match: "contains"
+    action: "wait"
+    duration: 2
+    verify_success:
+      - type: "text"
+        text: "What do you want to design"
+        text_match: "contains"
+    expected_delay: 5
+    timeout: 90
+
+  # === STEP 2: Cancel the popup ===
+  2:
+    description: "Click Cancel on the 'What do you want to design' overlay"
+    find:
+      type: "icon"
+      text: "Cancel"
+      text_match: "contains"
+    action:
+      type: "click"
+      button: "left"
+      move_duration: 0.5
+    verify_success:
+      - type: "text"
+        text: "What do you want to design"
+        text_match: "not_contains"
+    expected_delay: 2
+    timeout: 15

@@ -1,0 +1,73 @@
+metadata:
+  game_name: Fusion360
+  version: '1.0'
+  created_with: Katana Workflow Builder
+  created_date: '2026-02-24 17:29:31'
+  path: C:\Users\Local_Admin\AppData\Local\Autodesk\webdeploy\production\6a0c9611291d45bb9226980209917c3d\FusionLauncher.exe
+  benchmark_duration: 400
+  startup_wait: 30
+  resolution: 1920x1080
+  preset: High
+  graphics_api: DirectX 11
+steps:
+  1:
+    description: Start executable file
+    find:
+      type: any
+      text: 7Fus Autodesk Fusion
+      text_match: contains
+    action:
+      type: double_click
+    verify_success:
+    - type: text
+      text: Autodesk Fusion
+      text_match: contains
+    - type: icon
+      text: Cancel
+      text_match: contains
+    expected_delay: 25
+    timeout: 2
+  2:
+    description: Click cancel
+    find:
+      type: icon
+      text: Cancel
+      text_match: contains
+    action:
+      type: click
+      button: left
+      move_duration: 0.3
+      click_delay: 0.2
+    expected_delay: 2
+    timeout: 20
+  3:
+    description: Shift + S
+    find:
+      type: icon
+      text: ''
+      text_match: contains
+    action:
+      type: hotkey
+      keys:
+      - shift
+      - s
+    expected_delay: 2
+    timeout: 20
+  4:
+    description: click to run workload
+    find:
+      type: any
+      text: a navigation or direction indicator.
+      text_match: contains
+    action:
+      type: click
+      button: left
+      move_duration: 0.3
+      click_delay: 0.2
+    expected_delay: 2
+    timeout: 20
+fallbacks:
+  general:
+    action: key
+    key: escape
+    expected_delay: 1
