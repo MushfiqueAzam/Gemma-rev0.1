@@ -17,6 +17,8 @@ import yaml
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import os
 import sys
+import time
+import copy
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -102,6 +104,8 @@ class WorkflowStep:
         self.timeout = 20
         self.optional = False
         self.selected_bbox = None
+        self.last_screenshot_path = None  # Path to last parsed/annotated screenshot for this step
+        self.last_screenshot_time = None  # Timestamp string of last screenshot
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert step to YAML-compatible dictionary."""
@@ -374,8 +378,8 @@ class ActionDefinitionDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Define Action")
         screen_h = parent.winfo_screenheight()
-        win_h = min(1050, screen_h - 80)
-        self.geometry(f"680x{win_h}")
+        win_h = min(700, screen_h - 80)
+        self.geometry(f"740x{win_h}")
         self.resizable(True, True)
         self.result = None
         self.bbox = bbox
@@ -969,7 +973,7 @@ class WorkflowBuilderGUI:
         self.hooks = {"pre": [], "post": []}
 
         # SUT connection
-        self.sut_ip = tk.StringVar(value="192.168.50.196") #Razer laptop
+        self.sut_ip = tk.StringVar(value="192.168.50.136") #Razer laptop
         self.sut_port = tk.StringVar(value="8080")
 
         # Vision model connections
@@ -1196,11 +1200,40 @@ class WorkflowBuilderGUI:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.steps_listbox = ttk.Treeview(list_frame, yscrollcommand=scrollbar.set,
-                                           selectmode="browse", show="tree")
+                                           selectmode="browse", show="tree headings",
+                                           columns=("timestamp", "screenshot"))
         self.steps_listbox.column("#0", stretch=True)
+        self.steps_listbox.column("timestamp", width=68, minwidth=68, stretch=False, anchor=tk.CENTER)
+        self.steps_listbox.heading("timestamp", text="Timestamp")
+        self.steps_listbox.column("screenshot", width=36, minwidth=36, stretch=False, anchor=tk.CENTER)
+        self.steps_listbox.heading("screenshot", text="Capture")
         self.steps_listbox.tag_configure("verify", foreground="#0288D1")
         self.steps_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.steps_listbox.yview)
+
+        def _on_step_click(event):
+            # If the 📷 column was clicked, open the screenshot
+            col = self.steps_listbox.identify_column(event.x)
+            iid = self.steps_listbox.identify_row(event.y)
+            if col == "#2" and iid and not "_v_" in iid:
+                try:
+                    step_idx = int(iid.split("_")[1])
+                    path = self.workflow_steps[step_idx].last_screenshot_path
+                    if path and os.path.exists(path):
+                        import subprocess
+                        subprocess.Popen(["explorer", os.path.abspath(path)])
+                    else:
+                        self.log_result("No screenshot available for this step yet — run Test or Flow first.", "warn")
+                except (IndexError, ValueError):
+                    pass
+                return "break"
+            # Clicking already-selected row → deselect (ignore timestamp col clicks for deselect)
+            if col in ("#0", "#1") and iid and iid in self.steps_listbox.selection():
+                self.steps_listbox.selection_remove(iid)
+                self.steps_listbox.focus("")
+                return "break"
+
+        self.steps_listbox.bind("<Button-1>", _on_step_click)
 
         # COLLAPSIBLE Test Output Panel
         self.output_panel = CollapsibleFrame(right_panel, title="Test Output")
@@ -1927,7 +1960,6 @@ class WorkflowBuilderGUI:
         step = self.workflow_steps[idx]
 
         # Deep copy the step
-        import copy
         self.copied_step = copy.deepcopy(step)
         self.status_text.set(f"Copied step: {step.description}")
 
@@ -1937,7 +1969,6 @@ class WorkflowBuilderGUI:
             self.log_result("No step copied! Please copy a step first.", "warn")
             return
 
-        import copy
         # Deep copy to avoid reference issues
         new_step = copy.deepcopy(self.copied_step)
 
@@ -1994,7 +2025,10 @@ class WorkflowBuilderGUI:
             verify_elements = getattr(step, 'verify_elements', [])
             verify_tag = f"  [{len(verify_elements)} verify]" if verify_elements else ""
             display_text = f"{step.step_number}. {step.description or '[No description]'}{optional_tag}{verify_tag}"
+            ss_indicator = "📷" if getattr(step, 'last_screenshot_path', None) and os.path.exists(step.last_screenshot_path) else ""
+            ts_indicator = getattr(step, 'last_screenshot_time', None) or ""
             self.steps_listbox.insert("", "end", iid=iid, text=display_text,
+                                       values=(ts_indicator, ss_indicator),
                                        open=(iid in expanded))
             for j, elem in enumerate(verify_elements):
                 v_iid = f"step_{i}_v_{j}"
@@ -2002,7 +2036,7 @@ class WorkflowBuilderGUI:
                           f"'{elem.get('text', '')}' "
                           f"({elem.get('text_match', 'contains')})")
                 self.steps_listbox.insert(iid, "end", iid=v_iid, text=v_text,
-                                           tags=("verify",))
+                                           values=("", ""), tags=("verify",))
 
     def log_result(self, message, level="info"):
         """Append a message to the Test Output panel."""
@@ -2032,6 +2066,43 @@ class WorkflowBuilderGUI:
                         + "─" * max(0, 40 - len(step.description)), "header")
 
         try:
+            # Auto-capture and parse screenshot before executing the step
+            if self.screenshot_mgr:
+                self.log_result("Auto-capturing screenshot...", "info")
+                self.status_text.set("Auto-capturing screenshot...")
+                self.root.update()
+                os.makedirs("workflow_builder_temp", exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                screenshot_path = f"workflow_builder_temp/screenshot_{timestamp}.png"
+                self.screenshot_mgr.capture(screenshot_path)
+                self.current_screenshot = screenshot_path
+                self.screenshot_history.append({
+                    'captured': screenshot_path,
+                    'parsed': None,
+                    'timestamp': timestamp
+                })
+                self.log_result(f"Screenshot captured → {screenshot_path}", "pass")
+
+                if self.vision_model:
+                    self.log_result("Auto-parsing screenshot...", "info")
+                    self.status_text.set("Auto-parsing screenshot...")
+                    self.root.update()
+                    annotation_path = screenshot_path.replace(".png", "_annotated.png")
+                    self.current_bboxes = self.vision_model.detect_ui_elements(
+                        screenshot_path, annotation_path
+                    )
+                    self.canvas.load_image(screenshot_path, self.current_bboxes)
+                    if self.screenshot_history:
+                        self.screenshot_history[-1]['parsed'] = annotation_path
+                        self.refresh_ribbon()
+                    # Store annotated screenshot path + time on the step for the columns
+                    step.last_screenshot_path = annotation_path
+                    step.last_screenshot_time = datetime.now().strftime("%H:%M:%S")
+                    self.refresh_steps_list()
+                    self.log_result(f"Parsed — {len(self.current_bboxes)} UI elements detected", "pass")
+            else:
+                self.log_result("SUT not connected — skipping auto-capture", "warn")
+
             # Handle find_and_click actions
             if step.action_type == "find_and_click":
                 if step.selected_bbox:
@@ -2154,7 +2225,6 @@ class WorkflowBuilderGUI:
                 if delay > 0:
                     self.status_text.set(f"Step {step.step_number}: Waiting {delay}s before verify...")
                     self.root.update()
-                    import time
                     for t in range(int(delay * 10)):
                         time.sleep(0.1)
                         remaining = delay - (t / 10)
@@ -2164,7 +2234,6 @@ class WorkflowBuilderGUI:
 
                 self.status_text.set(f"Step {step.step_number}: Capturing screenshot for verification...")
                 self.root.update()
-                import os
                 os.makedirs("workflow_builder_temp", exist_ok=True)
                 v_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 verify_shot = f"workflow_builder_temp/test_verify_{step.step_number}_{v_ts}.png"
@@ -2278,7 +2347,6 @@ class WorkflowBuilderGUI:
                         self.root.update()
                         
                         # Capture screenshot
-                        import os
                         os.makedirs("workflow_builder_temp", exist_ok=True)
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         screenshot_path = f"workflow_builder_temp/flow_step_{i+1}_{timestamp}.png"
@@ -2292,12 +2360,18 @@ class WorkflowBuilderGUI:
                         self.root.update()
                         
                         # Parse screenshot
-                        bboxes = self.vision_model.detect_ui_elements(screenshot_path)
-                        
+                        annotation_path = screenshot_path.replace(".png", "_annotated.png")
+                        bboxes = self.vision_model.detect_ui_elements(screenshot_path, annotation_path)
+                        # Store annotated screenshot path on the step for 📷 column
+                        step.last_screenshot_path = annotation_path
+                        step.last_screenshot_time = datetime.now().strftime("%H:%M:%S")
+                        self.refresh_steps_list()
+                        self._select_step(i)
+
                         if self.flow_stop_requested:
                             stopped = True
                             break
-                        
+
                         # Find matching element
                         found_bbox = None
                         search_text = getattr(step, 'text', '')
@@ -2306,17 +2380,21 @@ class WorkflowBuilderGUI:
                         
                         for bbox in bboxes:
                             type_match = search_type in ["any", bbox.element_type]
-                            
-                            if type_match and search_text:
-                                if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
-                                    found_bbox = bbox
-                                    break
-                                elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
-                                    found_bbox = bbox
-                                    break
-                                elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
-                                    found_bbox = bbox
-                                    break
+                            if not type_match:
+                                continue
+                            # Empty search_text matches any element of the right type
+                            if not search_text:
+                                found_bbox = bbox
+                                break
+                            if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
+                                found_bbox = bbox
+                                break
+                            elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
+                                found_bbox = bbox
+                                break
+                            elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
+                                found_bbox = bbox
+                                break
                         
                         if found_bbox:
                             x = found_bbox.x + found_bbox.width // 2
@@ -2352,10 +2430,9 @@ class WorkflowBuilderGUI:
                 elif step.action_type in ["double_click", "right_click", "middle_click"]:
                     # Resolve coordinates using same capture+parse pattern as find_and_click
                     x, y = None, None
-                    if self.screenshot_mgr and self.vision_model and getattr(step, 'text', ''):
+                    if self.screenshot_mgr and self.vision_model:
                         self.status_text.set(f"Step {i + 1}: Capturing screenshot for {step.action_type}...")
                         self.root.update()
-                        import os
                         os.makedirs("workflow_builder_temp", exist_ok=True)
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         screenshot_path = f"workflow_builder_temp/flow_step_{i+1}_{timestamp}.png"
@@ -2363,7 +2440,13 @@ class WorkflowBuilderGUI:
                         if not self.flow_stop_requested:
                             self.status_text.set(f"Step {i + 1}: Parsing UI elements...")
                             self.root.update()
-                            bboxes = self.vision_model.detect_ui_elements(screenshot_path)
+                            annotation_path = screenshot_path.replace(".png", "_annotated.png")
+                            bboxes = self.vision_model.detect_ui_elements(screenshot_path, annotation_path)
+                            # Store annotated screenshot path on the step for 📷 column
+                            step.last_screenshot_path = annotation_path
+                            step.last_screenshot_time = datetime.now().strftime("%H:%M:%S")
+                            self.refresh_steps_list()
+                            self._select_step(i)
                             if not self.flow_stop_requested:
                                 search_text = getattr(step, 'text', '')
                                 search_type = getattr(step, 'element_type', 'any')
@@ -2371,16 +2454,21 @@ class WorkflowBuilderGUI:
                                 found_bbox = None
                                 for bbox in bboxes:
                                     type_match = search_type in ["any", bbox.element_type]
-                                    if type_match and search_text:
-                                        if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
-                                            found_bbox = bbox
-                                            break
-                                        elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
-                                            found_bbox = bbox
-                                            break
-                                        elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
-                                            found_bbox = bbox
-                                            break
+                                    if not type_match:
+                                        continue
+                                    # Empty search_text matches any element of the right type
+                                    if not search_text:
+                                        found_bbox = bbox
+                                        break
+                                    if match_mode == "contains" and search_text.lower() in bbox.element_text.lower():
+                                        found_bbox = bbox
+                                        break
+                                    elif match_mode == "exact" and search_text.lower() == bbox.element_text.lower():
+                                        found_bbox = bbox
+                                        break
+                                    elif match_mode == "startswith" and bbox.element_text.lower().startswith(search_text.lower()):
+                                        found_bbox = bbox
+                                        break
                                 if found_bbox:
                                     x = found_bbox.x + found_bbox.width // 2
                                     y = found_bbox.y + found_bbox.height // 2
@@ -2409,12 +2497,36 @@ class WorkflowBuilderGUI:
                     self.network.send_action(action)
 
                 elif step.action_config:
+                    # Capture + parse screenshot for all non-wait action types (key, hotkey, text, scroll)
+                    # so the 📷 column is populated regardless of action type.
+                    action_type_cfg = step.action_config.get('type', '')
+                    if action_type_cfg != 'wait' and self.screenshot_mgr and self.vision_model:
+                        self.status_text.set(f"Step {i + 1}: Capturing screenshot...")
+                        self.root.update()
+                        os.makedirs("workflow_builder_temp", exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        screenshot_path = f"workflow_builder_temp/flow_step_{i+1}_{timestamp}.png"
+                        self.screenshot_mgr.capture(screenshot_path)
+                        if not self.flow_stop_requested:
+                            self.status_text.set(f"Step {i + 1}: Parsing UI elements...")
+                            self.root.update()
+                            annotation_path = screenshot_path.replace(".png", "_annotated.png")
+                            self.vision_model.detect_ui_elements(screenshot_path, annotation_path)
+                            # Store annotated screenshot path on the step for 📷 column
+                            step.last_screenshot_path = annotation_path
+                            step.last_screenshot_time = datetime.now().strftime("%H:%M:%S")
+                            self.refresh_steps_list()
+                            self._select_step(i)
+
+                    if self.flow_stop_requested:
+                        stopped = True
+                        break
+
                     # Handle wait actions locally to avoid network timeout
                     if step.action_config.get('type') == 'wait':
                         wait_duration = step.action_config.get('duration', 1)
                         self.status_text.set(f"Step {i + 1}: Waiting {wait_duration}s...")
                         self.root.update()
-                        import time
                         for sec in range(int(wait_duration)):
                             if self.flow_stop_requested:
                                 stopped = True
@@ -2438,7 +2550,6 @@ class WorkflowBuilderGUI:
                 
                 # Wait for expected delay (in small chunks to check stop)
                 delay = getattr(step, 'expected_delay', 1)
-                import time
                 total_tenths = int(delay * 10)
                 for t in range(total_tenths):
                     if self.flow_stop_requested:
@@ -2462,7 +2573,6 @@ class WorkflowBuilderGUI:
                         f"Step {i + 1}: Capturing screenshot for verification...")
                     self.root.update()
 
-                    import os
                     os.makedirs("workflow_builder_temp", exist_ok=True)
                     v_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     verify_shot = (f"workflow_builder_temp/"

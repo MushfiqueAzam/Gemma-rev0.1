@@ -184,3 +184,8 @@ cython_debug/
 # Application Logs
 logs/
 workflow_builder_temp
+Test_Script_fusion360
+
+# Sensitive / private files
+sut_service_installer/gemma_service_0.1.py
+modules/omniparser_client_degraded.py

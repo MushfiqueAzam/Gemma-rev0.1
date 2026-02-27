@@ -2,7 +2,7 @@ metadata:
   game_name: Fusion360
   version: '1.0'
   created_with: Katana Workflow Builder
-  created_date: '2026-02-24 17:29:31'
+  created_date: '2026-02-26 14:05:42'
   path: C:\Users\Local_Admin\AppData\Local\Autodesk\webdeploy\production\6a0c9611291d45bb9226980209917c3d\FusionLauncher.exe
   benchmark_duration: 400
   startup_wait: 30
@@ -11,13 +11,46 @@ metadata:
   graphics_api: DirectX 11
 steps:
   1:
-    description: Start executable file
+    description: Start search
     find:
-      type: any
-      text: 7Fus Autodesk Fusion
+      type: icon
+      text: ''
       text_match: contains
     action:
-      type: double_click
+      type: hotkey
+      keys:
+      - win
+      - s
+    expected_delay: 2
+    timeout: 20
+  2:
+    description: Type Autodesk Fusion
+    find:
+      type: icon
+      text: ''
+      text_match: contains
+    action:
+      type: text
+      text: Autodesk Fusion
+      clear_first: false
+      char_delay: 0.05
+    verify_success:
+    - type: text
+      text: Autodesk Fusion
+      text_match: contains
+    expected_delay: 2
+    timeout: 20
+  3:
+    description: Start Autodesk Fusion
+    find:
+      type: any
+      text: Autodesk Fusion
+      text_match: contains
+    action:
+      type: click
+      button: right
+      move_duration: 0.3
+      click_delay: 0.2
     verify_success:
     - type: text
       text: Autodesk Fusion
@@ -26,8 +59,8 @@ steps:
       text: Cancel
       text_match: contains
     expected_delay: 25
-    timeout: 2
-  2:
+    timeout: 5
+  4:
     description: Click cancel
     find:
       type: icon
@@ -38,9 +71,13 @@ steps:
       button: left
       move_duration: 0.3
       click_delay: 0.2
+    verify_success:
+    - type: text
+      text: Autodesk Fusion
+      text_match: contains
     expected_delay: 2
     timeout: 20
-  3:
+  5:
     description: Shift + S
     find:
       type: icon
@@ -51,19 +88,24 @@ steps:
       keys:
       - shift
       - s
+    verify_success:
+    - type: text
+      text: Autodesk Fusion
+      text_match: contains
     expected_delay: 2
     timeout: 20
-  4:
+  6:
     description: click to run workload
     find:
-      type: any
-      text: a navigation or direction indicator.
+      type: icon
+      text: ''
       text_match: contains
     action:
-      type: click
-      button: left
-      move_duration: 0.3
-      click_delay: 0.2
+      type: double_click
+    verify_success:
+    - type: text
+      text: Autodesk Fusion
+      text_match: contains
     expected_delay: 2
     timeout: 20
 fallbacks:
